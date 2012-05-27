@@ -1,0 +1,103 @@
+#ifndef LIBUSBY_LIBUSB_H
+#define LIBUSBY_LIBUSB_H
+
+#include "libusby.h"
+
+#define libusb_context libusby_context
+#define libusb_device libusby_device
+#define libusb_device_handle libusby_device_handle
+#define libusb_transfer libusby_transfer
+#define libusb_endpoint_t libusby_endpoint_t
+#define libusb_timeout_t libusby_timeout_t
+
+#define libusb_interface libusby_interface
+#define libusb_interface_descriptor libusby_interface_descriptor
+#define libusb_endpoint_descriptor libusby_endpoint_descriptor
+#define libusb_device_descriptor libusby_device_descriptor
+#define libusb_config_descriptor libusby_config_descriptor
+
+#define libusb_transfer_cb_fn libusby_transfer_cb_fn;
+
+#define libusb_init libusby_init
+#define libusb_exit libusby_exit
+
+/* Device handling and enumeration */
+#define libusb_get_device_list libusby_get_device_list
+#define libusb_free_device_list libusby_free_device_list
+
+#define libusb_ref_device libusby_ref_device
+#define libusb_unref_device libusby_unref_device
+
+#define libusb_open libusby_open
+#define libusb_open_device_with_vid_pid libusby_open_device_with_vid_pid
+#define libusb_close libusby_close
+#define libusb_get_device libusby_get_device
+
+#define libusb_get_configuration libusby_get_configuration
+#define libusb_set_configuration libusby_set_configuration
+#define libusb_set_interface_alt_setting libusby_set_interface_alt_setting
+
+#define libusb_claim_interface libusby_claim_interface
+#define libusb_release_interface libusby_release_interface
+
+#define libusb_clear_halt libusby_clear_halt
+#define libusb_reset_device libusby_reset_device
+
+/* USB descriptors */
+#define libusb_get_device_descriptor libusby_get_device_descriptor_cached
+#define libusb_get_active_config_descriptor libusby_get_active_config_descriptor
+#define libusb_get_config_descriptor libusby_get_config_descriptor
+#define libusb_get_config_descriptor_by_value libusby_get_config_descriptor_by_value
+#define libusb_free_config_descriptor libusby_free_config_descriptor
+#define libusb_get_string_descriptor_ascii libusby_get_string_descriptor_ascii
+#define libusb_get_descriptor libusby_get_descriptor
+#define libusb_get_string_descriptor libusby_get_string_descriptor
+
+/* Asynchronous device I/O */
+#define libusb_alloc_transfer libusby_alloc_transfer
+#define libusb_free_transfer libusby_free_transfer
+#define libusb_submit_transfer libusby_submit_transfer
+#define libusb_cancel_transfer libusby_cancel_transfer
+#define libusb_control_transfer_get_data libusby_control_transfer_get_data
+#define libusb_fill_control_setup libusby_fill_control_setup
+#define libusb_fill_control_transfer libusby_fill_control_transfer
+#define libusb_fill_bulk_transfer libusby_fill_bulk_transfer
+#define libusb_fill_interrupt_transfer libusby_fill_interrupt_transfer
+
+/* Synchronous device I/O */
+#define libusb_control_transfer libusby_control_transfer
+#define libusb_bulk_transfer libusby_bulk_transfer
+#define libusb_interrupt_transfer libusby_interrupt_transfer
+
+/* Event loop */
+#define libusb_run_event_loop libusby_run_event_loop
+#define libusb_stop_event_loop libusby_stop_event_loop
+#define libusb_reset_event_loop libusby_reset_event_loop
+#define libusb_wait_for_transfer libusby_wait_for_transfer
+
+#define LIBUSB_CALL
+
+#define LIBUSB_TRANSFER_COMPLETED LIBUSBY_TRANSFER_COMPLETED
+#define LIBUSB_TRANSFER_ERROR LIBUSBY_TRANSFER_ERROR
+#define LIBUSB_TRANSFER_TIMED_OUT LIBUSBY_TRANSFER_TIMED_OUT
+#define LIBUSB_TRANSFER_CANCELLED LIBUSBY_TRANSFER_CANCELLED
+#define LIBUSB_TRANSFER_STALL LIBUSBY_TRANSFER_STALL
+#define LIBUSB_TRANSFER_NO_DEVICE LIBUSBY_TRANSFER_NO_DEVICE
+#define LIBUSB_TRANSFER_OVERFLOW LIBUSBY_TRANSFER_OVERFLOW
+
+#define LIBUSB_SUCCESS LIBUSBY_SUCCESS
+#define LIBUSB_ERROR_IO LIBUSBY_ERROR_IO
+#define LIBUSB_ERROR_INVALID_PARAM LIBUSBY_ERROR_INVALID_PARAM
+#define LIBUSB_ERROR_ACCESS LIBUSBY_ERROR_ACCESS
+#define LIBUSB_ERROR_NO_DEVICE LIBUSBY_ERROR_NO_DEVICE
+#define LIBUSB_ERROR_NOT_FOUND LIBUSBY_ERROR_NOT_FOUND
+#define LIBUSB_ERROR_BUSY LIBUSBY_ERROR_BUSY
+#define LIBUSB_ERROR_TIMEOUT LIBUSBY_ERROR_TIMEOUT
+#define LIBUSB_ERROR_OVERFLOW LIBUSBY_ERROR_OVERFLOW
+#define LIBUSB_ERROR_PIPE LIBUSBY_ERROR_PIPE
+#define LIBUSB_ERROR_INTERRUPTED LIBUSBY_ERROR_INTERRUPTED
+#define LIBUSB_ERROR_NO_MEM LIBUSBY_ERROR_NO_MEM
+#define LIBUSB_ERROR_NOT_SUPPORTED LIBUSBY_ERROR_NOT_SUPPORTED
+#define LIBUSB_ERROR_OTHER LIBUSBY_ERROR_OTHER
+
+#endif // LIBUSBY_LIBUSB_H
