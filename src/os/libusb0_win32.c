@@ -72,17 +72,18 @@ static void libusb0_exit(libusby_context *ctx)
 	FreeLibrary(ctxpriv->hKernel32);
 }
 
-static int libusb0_get_device_descriptor(HANDLE hFile, uint8_t * desc)
+static int libusb0_get_descriptor_with_handle(HANDLE hFile, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
 {
-	int r;
-
 	libusb0_win32_request req = {0};
-	req.descriptor.type = 1;
+	req.descriptor.type = desc_type;
+	req.descriptor.index = desc_index;
+	return sync_device_io_control(hFile, LIBUSB_IOCTL_GET_DESCRIPTOR, &req, sizeof req, data, length);
+}
 
-	r = sync_device_io_control(hFile, LIBUSB_IOCTL_GET_DESCRIPTOR, &req, sizeof req, desc, sizeof(libusby_device_descriptor));
-	if (r != sizeof(libusby_device_descriptor))
-		r = LIBUSBY_ERROR_IO;
-	return r;
+static int libusb0_get_descriptor(libusby_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
+{
+	libusb0_device_private * devpriv = usbyi_dev_to_devpriv(dev_handle->dev);
+	return libusb0_get_descriptor_with_handle(devpriv->hFile, desc_type, desc_index, data, length);
 }
 
 static int libusb0_get_device_list(libusby_context * ctx, libusby_device *** list)
@@ -123,7 +124,7 @@ static int libusb0_get_device_list(libusby_context * ctx, libusby_device *** lis
 			if (!newdev)
 				continue;
 
-			if (libusb0_get_device_descriptor(hFile, cached_desc) < 0
+			if (libusb0_get_descriptor_with_handle(hFile, 1, 0, cached_desc, sizeof cached_desc) != sizeof cached_desc
 				|| usbyi_sanitize_device_desc(&newdev->device_desc, cached_desc) < 0
 				|| usbyi_append_device_list(&devlist, newdev) < 0)
 			{
@@ -173,7 +174,10 @@ static void libusb0_update_finished_transfer(libusby_transfer * tran, DWORD dwEr
 	switch (dwError)
 	{
 	case ERROR_SUCCESS:
-		tran->actual_length = dwTransferred;
+		if (tran->type == LIBUSBY_TRANSFER_TYPE_CONTROL)
+			tran->actual_length = dwTransferred + 8;
+		else
+			tran->actual_length = dwTransferred;
 		tran->status = LIBUSBY_TRANSFER_COMPLETED;
 		break;
 
@@ -201,6 +205,8 @@ static int libusb0_submit_transfer(libusby_transfer * tran)
 	/* Note that we don't need to keep this around during the whole operation. It is copied
 	 * by the kernel into a temporary buffer. */
 	libusb0_win32_request req = {0};
+	uint8_t * data_ptr = 0;
+	int data_len = 0;
 
 	if (tran->type == LIBUSBY_TRANSFER_TYPE_BULK || tran->type == LIBUSBY_TRANSFER_TYPE_INTERRUPT)
 	{
@@ -209,13 +215,37 @@ static int libusb0_submit_transfer(libusby_transfer * tran)
 			dwControlCode = LIBUSB_IOCTL_INTERRUPT_OR_BULK_READ;
 		else
 			dwControlCode = LIBUSB_IOCTL_INTERRUPT_OR_BULK_WRITE;
+		data_ptr = tran->buffer;
+		data_len = tran->length;
+	}
+	else if (tran->type == LIBUSBY_TRANSFER_TYPE_CONTROL)
+	{
+		if (tran->length < 8)
+			return LIBUSBY_ERROR_INVALID_PARAM;
+
+		data_ptr = tran->buffer + 8;
+		data_len = tran->length - 8;
+
+		if (req.control.wLength > data_len)
+			return LIBUSBY_ERROR_INVALID_PARAM;
+
+		if (tran->buffer[0] & 0x80)
+			dwControlCode = LIBUSB_IOCTL_CONTROL_READ;
+		else
+			dwControlCode = LIBUSB_IOCTL_CONTROL_WRITE;
+
+		req.control.bmRequestType = tran->buffer[0];
+		req.control.bRequest = tran->buffer[1];
+		req.control.wValue = tran->buffer[2] | (tran->buffer[3] << 8);
+		req.control.wIndex = tran->buffer[4] | (tran->buffer[5] << 8);
+		req.control.wLength = tran->buffer[6] | (tran->buffer[7] << 8);
 	}
 	else
 	{
 		return LIBUSBY_ERROR_INVALID_PARAM;
 	}
 
-	res = DeviceIoControl(devpriv->hFile, dwControlCode, &req, sizeof req, tran->buffer, tran->length, &dwTransferred, &trani->os_priv.overlapped);
+	res = DeviceIoControl(devpriv->hFile, dwControlCode, &req, sizeof req, data_ptr, data_len, &dwTransferred, &trani->os_priv.overlapped);
 
 	/* We might have completed synchronously, we still have to reap asynchronously though. */
 	if (!res && GetLastError() != ERROR_IO_PENDING)
@@ -275,6 +305,7 @@ usbyi_backend const libusb0_win32_backend =
 	&libusb0_get_device_list,
 	0,
 	0,
+	&libusb0_get_descriptor,
 	&libusb0_claim_interface,
 	&libusb0_release_interface,
 	0,

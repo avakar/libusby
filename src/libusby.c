@@ -372,3 +372,65 @@ int usbyi_sanitize_device_desc(libusby_device_descriptor * desc, uint8_t * rawde
 	// FIXME: endianity
 	return LIBUSBY_SUCCESS;
 }
+
+int libusby_get_descriptor(libusby_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
+{
+	int r = LIBUSBY_ERROR_NOT_SUPPORTED;
+	if (dev_handle->dev->ctx->backend->get_descriptor)
+		r = dev_handle->dev->ctx->backend->get_descriptor(dev_handle, desc_type, desc_index, data, length);
+
+	if (r == LIBUSBY_ERROR_NOT_SUPPORTED)
+	{
+		uint8_t * buffer = 0;
+		libusby_transfer * tran = libusby_alloc_transfer(dev_handle->dev->ctx, 0);
+		if (!tran)
+			return LIBUSBY_ERROR_NO_MEM;
+
+		buffer = malloc(length + 8);
+		if (!buffer)
+		{
+			libusby_free_transfer(tran);
+			return LIBUSBY_ERROR_NO_MEM;
+		}
+
+		buffer[0] = 0x80;
+		buffer[1] = 6 /*GET_DESCRIPTOR*/;
+		buffer[2] = desc_index;
+		buffer[3] = desc_type;
+		buffer[4] = 0;
+		buffer[5] = 0;
+		buffer[6] = (uint8_t)length;
+		buffer[7] = (uint8_t)(length >> 8);
+
+		libusby_fill_control_transfer(tran, dev_handle, buffer, NULL, 0, 0);
+		libusby_perform_transfer(tran);
+
+		if (tran->status != LIBUSBY_TRANSFER_COMPLETED)
+		{
+			r = LIBUSBY_ERROR_IO;
+		}
+		else
+		{
+			assert(tran->actual_length >= 8);
+			memcpy(data, buffer + 8, tran->actual_length - 8);
+			r = tran->actual_length - 8;
+		}
+
+		free(buffer);
+		libusby_free_transfer(tran);
+	}
+
+	return r;
+}
+
+void libusby_fill_control_transfer(libusby_transfer * transfer, libusby_device_handle * dev_handle, uint8_t * buffer, libusby_transfer_cb_fn callback, void * user_data, libusby_timeout_t timeout)
+{
+	transfer->dev_handle = dev_handle;
+	transfer->buffer = buffer;
+	transfer->callback = callback;
+	transfer->user_data = user_data;
+	transfer->timeout = timeout;
+	transfer->endpoint = 0;
+	transfer->length = (buffer[6] | (buffer[7] << 8)) + 8;
+	transfer->type = LIBUSBY_TRANSFER_TYPE_CONTROL;
+}

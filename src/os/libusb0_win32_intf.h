@@ -14,6 +14,8 @@
 #define LIBUSB_IOCTL_RESET_DEVICE            CTL_CODE(FILE_DEVICE_UNKNOWN, 0x810, METHOD_BUFFERED,   FILE_ANY_ACCESS)
 #define LIBUSB_IOCTL_CLAIM_INTERFACE         CTL_CODE(FILE_DEVICE_UNKNOWN, 0x815, METHOD_BUFFERED,   FILE_ANY_ACCESS)
 #define LIBUSB_IOCTL_RELEASE_INTERFACE       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x816, METHOD_BUFFERED,   FILE_ANY_ACCESS)
+#define LIBUSB_IOCTL_CONTROL_WRITE           CTL_CODE(FILE_DEVICE_UNKNOWN, 0x90A, METHOD_IN_DIRECT,  FILE_ANY_ACCESS)
+#define LIBUSB_IOCTL_CONTROL_READ            CTL_CODE(FILE_DEVICE_UNKNOWN, 0x90B, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
 
 typedef struct libusb0_win32_request
 {
@@ -46,6 +48,14 @@ typedef struct libusb0_win32_request
 			uint32_t language_id;
 			uint32_t recipient;
 		} descriptor;
+
+		struct {
+			uint8_t  bmRequestType;
+			uint8_t  bRequest;
+			uint16_t wValue;
+			uint16_t wIndex;
+			uint16_t wLength;
+		} control;
 	};
 } libusb0_win32_request;
 
