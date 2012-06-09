@@ -88,7 +88,6 @@ static int libusb0_get_descriptor(libusby_device_handle * dev_handle, uint8_t de
 
 static int libusb0_get_device_list(libusby_context * ctx, libusby_device *** list)
 {
-	libusb0_ctx * ctxpriv = usbyi_ctx_to_priv(ctx);
 	usbyi_device_list devlist = {0};
 	int i;
 	for (i = 1; i < LIBUSB_MAX_NUMBER_OF_DEVICES; ++i)
@@ -194,7 +193,6 @@ static void libusb0_update_finished_transfer(libusby_transfer * tran, DWORD dwEr
 
 static int libusb0_submit_transfer(libusby_transfer * tran)
 {
-	libusb0_ctx * ctx_priv = usbyi_ctx_to_priv(tran->dev_handle->dev->ctx);
 	usbyi_transfer * trani = usbyi_tran_to_trani(tran);
 	libusb0_device_private * devpriv = usbyi_dev_to_devpriv(tran->dev_handle->dev);
 
@@ -280,7 +278,6 @@ static int libusb0_cancel_transfer(libusby_transfer * tran)
 
 static void libusb0_reap_transfer(usbyi_transfer * trani)
 {
-	libusb0_ctx * ctx_priv = usbyi_ctx_to_priv(trani->ctx);
 	libusby_transfer * tran = usbyi_trani_to_tran(trani);
 	usbyi_os_transfer * tranos = &trani->os_priv;
 	libusb0_device_private * devpriv = usbyi_dev_to_devpriv(tran->dev_handle->dev);
