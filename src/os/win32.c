@@ -19,6 +19,7 @@ int usbyi_init_os_transfer(usbyi_transfer * trani)
 		return LIBUSBY_ERROR_NO_MEM;
 	}
 
+	trani->os_priv.submitted = 0;
 	return LIBUSBY_SUCCESS;
 }
 
@@ -42,6 +43,7 @@ void usbyi_win32_add_transfer(usbyi_transfer * trani)
 	if (!ctx_priv->trani_first)
 		ctx_priv->trani_first = trani;
 	++ctx_priv->tran_count;
+	trani->os_priv.submitted = 1;
 	SetEvent(ctx_priv->hTransferListUpdated);
 	LeaveCriticalSection(&ctx_priv->ctx_mutex);
 }
@@ -67,6 +69,7 @@ void usbyi_win32_remove_transfer(usbyi_transfer * trani)
 	trani->prev = 0;
 	--ctx_priv->tran_count;
 
+	trani->os_priv.submitted = 0;
 	LeaveCriticalSection(&ctx_priv->ctx_mutex);
 }
 

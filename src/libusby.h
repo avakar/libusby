@@ -56,6 +56,10 @@ typedef enum libusby_transfer_type
 	LIBUSBY_TRANSFER_TYPE_INTERRUPT = 3,
 } libusby_transfer_type;
 
+#define LIBUSBY_ENDPOINT_DIR_MASK 0x80
+#define LIBUSBY_ENDPOINT_IN 0x80
+#define LIBUSBY_ENDPOINT_OUT 0x00
+
 typedef struct libusby_iso_packet_descriptor {
 	int length;
 	int actual_length;
@@ -111,9 +115,6 @@ typedef struct libusby_endpoint_descriptor
 	uint8_t  bInterval;
 	uint8_t  bRefresh;
 	uint8_t  bSynchAddress;
-
-	uint8_t const * extra;
-	int      extra_length;
 } libusby_endpoint_descriptor;
 
 typedef struct libusby_interface_descriptor
@@ -127,15 +128,12 @@ typedef struct libusby_interface_descriptor
 	uint8_t bInterfaceSubClass;
 	uint8_t bInterfaceProtocol;
 	uint8_t iInterface;
-	libusby_endpoint_descriptor const * endpoint;
-
-	uint8_t const * extra;
-	int     extra_length;
+	libusby_endpoint_descriptor * endpoint;
 } libusby_interface_descriptor;
 
 typedef struct libusby_interface
 {
-	libusby_interface_descriptor const * altsetting;
+	libusby_interface_descriptor * altsetting;
 	int num_altsetting;
 } libusby_interface;
 
@@ -149,11 +147,16 @@ typedef struct libusby_config_descriptor
 	uint8_t  iConfiguration;
 	uint8_t  bmAttributes;
 	uint8_t  MaxPower;
-	libusby_interface const * interface;
-
-	uint8_t const * extra;
-	int      extra_length;
+	libusby_interface * interface;
 } libusby_config_descriptor;
+
+/*typedef enum libusby_transfer_flags
+{
+	LIBUSBY_TRANSFER_SHORT_NOT_OK    = (1<<0),
+	LIBUSBY_TRANSFER_FREE_BUFFER     = (1<<1),
+	LIBUSBY_TRANSFER_FREE_TRANSFER   = (1<<2),
+	LIBUSBY_TRANSFER_ADD_ZERO_PACKET = (1<<3),
+} libusby_transfer_flags;*/
 
 /* Library initialization/exit */
 int libusby_init(libusby_context ** ctx);
@@ -172,6 +175,7 @@ void libusby_close(libusby_device_handle * dev_handle);
 libusby_device * libusby_get_device(libusby_device_handle * dev_handle);
 
 int libusby_get_configuration(libusby_device_handle * dev_handle, int * config_value);
+int libusby_get_configuration_cached(libusby_device_handle * dev_handle, int * config_value);
 int libusby_set_configuration(libusby_device_handle * dev_handle, int config_value);
 int libusby_set_interface_alt_setting(libusby_device_handle * dev_handle, int interface_number, int alternate_setting);
 
@@ -183,7 +187,7 @@ int libusby_reset_device(libusby_device_handle * dev_handle);
 
 /* USB descriptors */
 int libusby_get_device_descriptor_cached(libusby_device * dev, libusby_device_descriptor * desc);
-int libusby_get_device_descriptor(libusby_device_handle * dev_handle, libusby_device_descriptor * desc, libusby_timeout_t timeout);
+int libusby_get_device_descriptor(libusby_device_handle * dev_handle, libusby_device_descriptor * desc);
 int libusby_get_active_config_descriptor(libusby_device_handle * dev_handle, libusby_config_descriptor ** config);
 int libusby_get_config_descriptor(libusby_device_handle * dev_handle, uint8_t config_index, libusby_config_descriptor ** config);
 int libusby_get_config_descriptor_by_value(libusby_device_handle * dev_handle, uint8_t config_value, libusby_config_descriptor ** config);

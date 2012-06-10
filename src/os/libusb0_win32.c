@@ -86,6 +86,21 @@ static int libusb0_get_descriptor(libusby_device_handle * dev_handle, uint8_t de
 	return libusb0_get_descriptor_with_handle(devpriv->hFile, desc_type, desc_index, data, length);
 }
 
+static int libusb0_get_configuration(libusby_device_handle * dev_handle, int * config_value, int cached_only)
+{
+	libusb0_device_private * devpriv = usbyi_dev_to_devpriv(dev_handle->dev);
+	libusb0_win32_request req = {0};
+	uint8_t res;
+
+	int r = sync_device_io_control(devpriv->hFile, LIBUSB_IOCTL_GET_CACHED_CONFIGURATION, &req, sizeof req, &res, sizeof res);
+	if (r != 1 && !cached_only)
+		r = sync_device_io_control(devpriv->hFile, LIBUSB_IOCTL_GET_CONFIGURATION, &req, sizeof req, &res, sizeof res);
+
+	if (r >= 0)
+		*config_value = res;
+	return r;
+}
+
 static int libusb0_get_device_list(libusby_context * ctx, libusby_device *** list)
 {
 	usbyi_device_list devlist = {0};
@@ -191,6 +206,82 @@ static void libusb0_update_finished_transfer(libusby_transfer * tran, DWORD dwEr
 	}
 }
 
+static int libusb0_prepare_transfer_submission(libusby_transfer * tran, DWORD * dwControlCode, libusb0_win32_request * req, uint8_t ** data_ptr, int * data_len)
+{
+	if (tran->type == LIBUSBY_TRANSFER_TYPE_BULK || tran->type == LIBUSBY_TRANSFER_TYPE_INTERRUPT)
+	{
+		req->endpoint.endpoint = tran->endpoint;
+		if (tran->endpoint & 0x80)
+			*dwControlCode = LIBUSB_IOCTL_INTERRUPT_OR_BULK_READ;
+		else
+			*dwControlCode = LIBUSB_IOCTL_INTERRUPT_OR_BULK_WRITE;
+		*data_ptr = tran->buffer;
+		*data_len = tran->length;
+	}
+	else if (tran->type == LIBUSBY_TRANSFER_TYPE_CONTROL)
+	{
+		if (tran->length < 8)
+			return LIBUSBY_ERROR_INVALID_PARAM;
+
+		*data_ptr = tran->buffer + 8;
+		*data_len = tran->length - 8;
+
+		if (tran->buffer[0] & 0x80)
+			*dwControlCode = LIBUSB_IOCTL_CONTROL_READ;
+		else
+			*dwControlCode = LIBUSB_IOCTL_CONTROL_WRITE;
+
+		req->control.bmRequestType = tran->buffer[0];
+		req->control.bRequest = tran->buffer[1];
+		req->control.wValue = tran->buffer[2] | (tran->buffer[3] << 8);
+		req->control.wIndex = tran->buffer[4] | (tran->buffer[5] << 8);
+		req->control.wLength = tran->buffer[6] | (tran->buffer[7] << 8);
+
+		if (req->control.wLength > *data_len)
+			return LIBUSBY_ERROR_INVALID_PARAM;
+	}
+	else
+	{
+		return LIBUSBY_ERROR_INVALID_PARAM;
+	}
+
+	return LIBUSBY_SUCCESS;
+}
+
+static int libusb0_perform_transfer(libusby_transfer * tran)
+{
+	usbyi_transfer * trani = usbyi_tran_to_trani(tran);
+	libusb0_device_private * devpriv = usbyi_dev_to_devpriv(tran->dev_handle->dev);
+
+	DWORD dwControlCode = 0;
+	libusb0_win32_request req = {0};
+	uint8_t * data_ptr = 0;
+	int data_len = 0;
+	DWORD dwTransferred;
+	DWORD dwError = ERROR_SUCCESS;
+
+	int r = libusb0_prepare_transfer_submission(tran, &dwControlCode, &req, &data_ptr, &data_len);
+	if (r < 0)
+		return r;
+
+	if (!DeviceIoControl(devpriv->hFile, dwControlCode, &req, sizeof req, data_ptr, data_len, &dwTransferred, &trani->os_priv.overlapped))
+	{
+		dwError = GetLastError();
+		if (dwError == ERROR_IO_PENDING)
+		{
+			if (!GetOverlappedResult(devpriv->hFile, &trani->os_priv.overlapped, &dwTransferred, TRUE))
+				dwError = GetLastError();
+			else
+				dwError = ERROR_SUCCESS;
+		}
+	}
+
+	libusb0_update_finished_transfer(tran, dwError, dwTransferred);
+	if (tran->callback)
+		tran->callback(tran);
+	return LIBUSBY_SUCCESS;
+}
+
 static int libusb0_submit_transfer(libusby_transfer * tran)
 {
 	usbyi_transfer * trani = usbyi_tran_to_trani(tran);
@@ -206,42 +297,9 @@ static int libusb0_submit_transfer(libusby_transfer * tran)
 	uint8_t * data_ptr = 0;
 	int data_len = 0;
 
-	if (tran->type == LIBUSBY_TRANSFER_TYPE_BULK || tran->type == LIBUSBY_TRANSFER_TYPE_INTERRUPT)
-	{
-		req.endpoint.endpoint = tran->endpoint;
-		if (tran->endpoint & 0x80)
-			dwControlCode = LIBUSB_IOCTL_INTERRUPT_OR_BULK_READ;
-		else
-			dwControlCode = LIBUSB_IOCTL_INTERRUPT_OR_BULK_WRITE;
-		data_ptr = tran->buffer;
-		data_len = tran->length;
-	}
-	else if (tran->type == LIBUSBY_TRANSFER_TYPE_CONTROL)
-	{
-		if (tran->length < 8)
-			return LIBUSBY_ERROR_INVALID_PARAM;
-
-		data_ptr = tran->buffer + 8;
-		data_len = tran->length - 8;
-
-		if (req.control.wLength > data_len)
-			return LIBUSBY_ERROR_INVALID_PARAM;
-
-		if (tran->buffer[0] & 0x80)
-			dwControlCode = LIBUSB_IOCTL_CONTROL_READ;
-		else
-			dwControlCode = LIBUSB_IOCTL_CONTROL_WRITE;
-
-		req.control.bmRequestType = tran->buffer[0];
-		req.control.bRequest = tran->buffer[1];
-		req.control.wValue = tran->buffer[2] | (tran->buffer[3] << 8);
-		req.control.wIndex = tran->buffer[4] | (tran->buffer[5] << 8);
-		req.control.wLength = tran->buffer[6] | (tran->buffer[7] << 8);
-	}
-	else
-	{
-		return LIBUSBY_ERROR_INVALID_PARAM;
-	}
+	int r = libusb0_prepare_transfer_submission(tran, &dwControlCode, &req, &data_ptr, &data_len);
+	if (r < 0)
+		return r;
 
 	res = DeviceIoControl(devpriv->hFile, dwControlCode, &req, sizeof req, data_ptr, data_len, &dwTransferred, &trani->os_priv.overlapped);
 
@@ -287,9 +345,12 @@ static void libusb0_reap_transfer(usbyi_transfer * trani)
 
 	libusb0_update_finished_transfer(tran,  res? ERROR_SUCCESS: GetLastError(), dwTransferred);
 	usbyi_win32_remove_transfer(trani);
+
 	if (tran->callback)
 		tran->callback(tran);
-	SetEvent(tranos->hCompletionEvent);
+
+	if (!tranos->submitted)
+		SetEvent(tranos->hCompletionEvent);
 }
 
 usbyi_backend const libusb0_win32_backend =
@@ -303,9 +364,10 @@ usbyi_backend const libusb0_win32_backend =
 	0,
 	0,
 	&libusb0_get_descriptor,
+	&libusb0_get_configuration,
 	&libusb0_claim_interface,
 	&libusb0_release_interface,
-	0,
+	&libusb0_perform_transfer,
 	&libusb0_submit_transfer,
 	&libusb0_cancel_transfer,
 	&libusb0_reap_transfer,

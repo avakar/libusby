@@ -33,6 +33,7 @@ struct usbyi_os_transfer
 {
 	HANDLE hCompletionEvent;
 	OVERLAPPED overlapped;
+	int submitted;
 };
 
 int usbyi_init_os_ctx(libusby_context * ctx);
