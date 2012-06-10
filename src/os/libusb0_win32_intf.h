@@ -2,6 +2,7 @@
 #define LIBUSBY_OS_LIBUSB0_WIN32_INTF_H
 
 #include <stdint.h>
+#include <winioctl.h>
 
 #define LIBUSB_MAX_NUMBER_OF_DEVICES 256
 
