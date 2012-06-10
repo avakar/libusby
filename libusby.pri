@@ -3,6 +3,7 @@ HEADERS += $$PWD/src/libusb.h \
     $$PWD/src/libusby.h \
     $$PWD/src/libusbyi.h \
     $$PWD/src/libusbyi_fwd.h
+INCLUDEPATH += $$PWD/src
 
 win32 {
     SOURCES += $$PWD/src/os/libusb0_win32.c \
