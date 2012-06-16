@@ -422,10 +422,12 @@ int libusby_control_transfer(libusby_device_handle * dev_handle, uint8_t bmReque
 
 int libusby_get_descriptor(libusby_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
 {
+	int r = LIBUSBY_ERROR_NOT_SUPPORTED;
 	if (dev_handle->dev->ctx->backend->get_descriptor)
-		return dev_handle->dev->ctx->backend->get_descriptor(dev_handle, desc_type, desc_index, data, length);
-	else
-		return libusby_control_transfer(dev_handle, 0x80, 6/*GET_DESCRIPTOR*/, desc_index | (desc_type << 8), 0, data, length, 0);
+		r = dev_handle->dev->ctx->backend->get_descriptor(dev_handle, desc_type, desc_index, data, length);
+	if (r == LIBUSBY_ERROR_NOT_SUPPORTED)
+		r = libusby_control_transfer(dev_handle, 0x80, 6/*GET_DESCRIPTOR*/, desc_index | (desc_type << 8), 0, data, length, 0);
+	return r;
 }
 
 void libusby_fill_control_transfer(libusby_transfer * transfer, libusby_device_handle * dev_handle, uint8_t * buffer, libusby_transfer_cb_fn callback, void * user_data, libusby_timeout_t timeout)
