@@ -101,6 +101,15 @@ static int libusb0_get_configuration(libusby_device_handle * dev_handle, int * c
 	return r;
 }
 
+static int libusb0_set_configuration(libusby_device_handle * dev_handle, int config_value)
+{
+	libusb0_device_private * devpriv = usbyi_dev_to_devpriv(dev_handle->dev);
+	libusb0_win32_request req = {0};
+
+	req.configuration.configuration = config_value;
+	return sync_device_io_control(devpriv->hFile, LIBUSB_IOCTL_SET_CONFIGURATION, &req, sizeof req, 0, 0);
+}
+
 static int libusb0_get_device_list(libusby_context * ctx, libusby_device *** list)
 {
 	usbyi_device_list devlist = {0};
@@ -365,7 +374,7 @@ usbyi_backend const libusb0_win32_backend =
 	0,
 	&libusb0_get_descriptor,
 	&libusb0_get_configuration,
-	0,
+	&libusb0_set_configuration,
 	&libusb0_claim_interface,
 	&libusb0_release_interface,
 	&libusb0_perform_transfer,
