@@ -3,6 +3,8 @@
 
 #ifdef _WIN32
 #include "os/win32.h"
+#elif __linux
+#include "os/linux_usbfs.h"
 #else
 #error Unsupported architecture.
 #endif
@@ -24,6 +26,7 @@ struct usbyi_device_list
 struct libusby_context
 {
 	usbyi_backend const * backend;
+	// XXX: devicelist lock
 	usbyi_device_list devices;
 	usbyi_os_ctx os_priv;
 };
@@ -61,14 +64,14 @@ struct usbyi_backend
 
 	int (*get_device_list)(libusby_context * ctx, libusby_device *** list);
 
-	int (*open)(libusby_device_handle *dev_handle);
-	void (*close)(libusby_device_handle *dev_handle);
+	int (*open)(libusby_device_handle *dev_handle); // opt
+	void (*close)(libusby_device_handle *dev_handle); // opt
 
-	int (*get_descriptor)(libusby_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length);
-	int (*get_configuration)(libusby_device_handle * dev_handle, int * config_value, int cached_only);
+	int (*get_descriptor)(libusby_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length); // opt
+	int (*get_configuration)(libusby_device_handle * dev_handle, int * config_value, int cached_only); // opt
 
-	int (*claim_interface)(libusby_device_handle * dev_handle, int interface_number);
-	int (*release_interface)(libusby_device_handle * dev_handle, int interface_number);
+	int (*claim_interface)(libusby_device_handle * dev_handle, int interface_number); // opt
+	int (*release_interface)(libusby_device_handle * dev_handle, int interface_number); // opt
 
 	int (*perform_transfer)(libusby_transfer * tran); // opt
 	int (*submit_transfer)(libusby_transfer * tran);

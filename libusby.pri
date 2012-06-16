@@ -12,3 +12,8 @@ win32 {
         $$PWD/src/os/libusb0_win32_intf.h \
         $$PWD/src/os/win32.h
 }
+
+linux-g++ {
+    SOURCES += $$PWD/src/os/linux_usbfs.c
+    HEADERS += $$PWD/src/os/linux_usbfs.h
+}
