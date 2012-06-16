@@ -658,6 +658,24 @@ int libusby_get_configuration(libusby_device_handle * dev_handle, int * config_v
 	return r;
 }
 
+int libusby_set_configuration(libusby_device_handle * dev_handle, int config_value)
+{
+	int r = LIBUSBY_ERROR_NOT_SUPPORTED;
+	if (dev_handle->dev->ctx->backend->set_configuration)
+		r = dev_handle->dev->ctx->backend->set_configuration(dev_handle, config_value);
+
+	if (r == LIBUSBY_ERROR_NOT_SUPPORTED)
+	{
+		r = libusby_control_transfer(dev_handle, 0x80, 9/*SET_CONFIGURATION*/, config_value, 0, 0, 0, 0);
+		if (r == 0)
+			r = LIBUSBY_SUCCESS;
+		else
+			r = LIBUSBY_ERROR_IO;
+	}
+
+	return r;
+}
+
 int libusby_get_configuration_cached(libusby_device_handle * dev_handle, int * config_value)
 {
 	int r = LIBUSBY_ERROR_NOT_SUPPORTED;

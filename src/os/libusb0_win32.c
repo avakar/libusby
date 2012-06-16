@@ -365,6 +365,7 @@ usbyi_backend const libusb0_win32_backend =
 	0,
 	&libusb0_get_descriptor,
 	&libusb0_get_configuration,
+	0,
 	&libusb0_claim_interface,
 	&libusb0_release_interface,
 	&libusb0_perform_transfer,

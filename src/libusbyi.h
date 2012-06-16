@@ -68,7 +68,9 @@ struct usbyi_backend
 	void (*close)(libusby_device_handle *dev_handle); // opt
 
 	int (*get_descriptor)(libusby_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length); // opt
+
 	int (*get_configuration)(libusby_device_handle * dev_handle, int * config_value, int cached_only); // opt
+	int (*set_configuration)(libusby_device_handle * dev_handle, int config_value); // opt
 
 	int (*claim_interface)(libusby_device_handle * dev_handle, int interface_number); // opt
 	int (*release_interface)(libusby_device_handle * dev_handle, int interface_number); // opt

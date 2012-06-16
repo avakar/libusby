@@ -43,6 +43,7 @@ typedef struct usbfs_device_private
 typedef struct usbfs_devhandle_private
 {
     int wrfd;
+    int active_config_value;
 } usbfs_devhandle_private;
 
 int usbyi_init_os_ctx(libusby_context * ctx)
@@ -385,6 +386,8 @@ static int usbfs_error()
     {
     case ENODEV:
         return LIBUSBY_ERROR_NO_DEVICE;
+    case EBUSY:
+        return LIBUSBY_ERROR_BUSY;
     default:
         return LIBUSBY_ERROR_IO;
     }
@@ -488,6 +491,7 @@ static int usbfs_open(libusby_device_handle *dev_handle)
         return LIBUSBY_ERROR_ACCESS;
 
     handlepriv->wrfd = wrfd;
+    handlepriv->active_config_value = -1;
     return LIBUSBY_SUCCESS;
 }
 
@@ -530,6 +534,9 @@ static int usbfs_perform_transfer(libusby_transfer * tran)
             case ENODEV:
                 tran->status = LIBUSBY_TRANSFER_NO_DEVICE;
                 break;
+            case EPIPE:
+                tran->status = LIBUSBY_TRANSFER_STALL;
+                break;
             default:
                 tran->status = LIBUSBY_TRANSFER_ERROR;
             }
@@ -544,7 +551,7 @@ static int usbfs_perform_transfer(libusby_transfer * tran)
 static int usbfs_claim_interface(libusby_device_handle * dev_handle, int interface_number)
 {
     usbfs_devhandle_private * handlepriv = usbyi_handle_to_handlepriv(dev_handle);
-    if (ioctl(handlepriv->wrfd, USBDEVFS_CLAIMINTERFACE, interface_number) < 0)
+    if (ioctl(handlepriv->wrfd, USBDEVFS_CLAIMINTERFACE, &interface_number) < 0)
         return usbfs_error();
     return LIBUSBY_SUCCESS;
 }
@@ -552,8 +559,28 @@ static int usbfs_claim_interface(libusby_device_handle * dev_handle, int interfa
 static int usbfs_release_interface(libusby_device_handle * dev_handle, int interface_number)
 {
     usbfs_devhandle_private * handlepriv = usbyi_handle_to_handlepriv(dev_handle);
-    if (ioctl(handlepriv->wrfd, USBDEVFS_RELEASEINTERFACE, interface_number) < 0)
+    if (ioctl(handlepriv->wrfd, USBDEVFS_RELEASEINTERFACE, &interface_number) < 0)
         return usbfs_error();
+    return LIBUSBY_SUCCESS;
+}
+
+int usbfs_get_configuration(libusby_device_handle * dev_handle, int * config_value, int cached_only)
+{
+    usbfs_devhandle_private * handlepriv = usbyi_handle_to_handlepriv(dev_handle);
+    if (handlepriv->active_config_value < 0)
+        return LIBUSBY_ERROR_NOT_SUPPORTED;
+    *config_value = handlepriv->active_config_value;
+    return LIBUSBY_SUCCESS;
+}
+
+int usbfs_set_configuration(libusby_device_handle * dev_handle, int config_value)
+{
+    usbfs_devhandle_private * handlepriv = usbyi_handle_to_handlepriv(dev_handle);
+
+    if (ioctl(handlepriv->wrfd, USBDEVFS_SETCONFIGURATION, &config_value) < 0)
+        return usbfs_error();
+
+    handlepriv->active_config_value = config_value;
     return LIBUSBY_SUCCESS;
 }
 
@@ -571,7 +598,8 @@ static usbyi_backend const linux_usbfs_backend = {
     &usbfs_close,
 
     &usbfs_get_descriptor,
-    0,
+    &usbfs_get_configuration,
+    &usbfs_set_configuration,
 
     &usbfs_claim_interface,
     &usbfs_release_interface,
