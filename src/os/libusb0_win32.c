@@ -80,10 +80,15 @@ static int libusb0_get_descriptor_with_handle(HANDLE hFile, uint8_t desc_type, u
 	return sync_device_io_control(hFile, LIBUSB_IOCTL_GET_DESCRIPTOR, &req, sizeof req, data, length);
 }
 
+static int libusb0_get_descriptor_cached(libusby_device * dev, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
+{
+	libusb0_device_private * devpriv = usbyi_dev_to_devpriv(dev);
+	return libusb0_get_descriptor_with_handle(devpriv->hFile, desc_type, desc_index, data, length);
+}
+
 static int libusb0_get_descriptor(libusby_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
 {
-	libusb0_device_private * devpriv = usbyi_dev_to_devpriv(dev_handle->dev);
-	return libusb0_get_descriptor_with_handle(devpriv->hFile, desc_type, desc_index, data, length);
+	return libusb0_get_descriptor_cached(dev_handle->dev, desc_type, desc_index, data, length);
 }
 
 static int libusb0_get_configuration(libusby_device_handle * dev_handle, int * config_value, int cached_only)
@@ -295,6 +300,8 @@ static int libusb0_submit_transfer(libusby_transfer * tran)
 {
 	usbyi_transfer * trani = usbyi_tran_to_trani(tran);
 	libusb0_device_private * devpriv = usbyi_dev_to_devpriv(tran->dev_handle->dev);
+	libusby_context * ctx = trani->ctx;
+	usbyi_os_ctx * ctx_priv = &ctx->os_priv;
 
 	DWORD dwControlCode = 0;
 	DWORD dwTransferred;
@@ -310,24 +317,46 @@ static int libusb0_submit_transfer(libusby_transfer * tran)
 	if (r < 0)
 		return r;
 
+	EnterCriticalSection(&ctx_priv->ctx_mutex);
+
 	res = DeviceIoControl(devpriv->hFile, dwControlCode, &req, sizeof req, data_ptr, data_len, &dwTransferred, &trani->os_priv.overlapped);
 
 	/* We might have completed synchronously, we still have to reap asynchronously though. */
 	if (!res && GetLastError() != ERROR_IO_PENDING)
+	{
+		LeaveCriticalSection(&ctx_priv->ctx_mutex);
 		return LIBUSBY_ERROR_IO;
+	}
 
 	ResetEvent(trani->os_priv.hCompletionEvent);
-	usbyi_win32_add_transfer(trani);
+
+	trani->next = 0;
+	trani->prev = ctx_priv->trani_last;
+	if (ctx_priv->trani_last)
+		ctx_priv->trani_last->next = trani;
+	ctx_priv->trani_last = trani;
+	if (!ctx_priv->trani_first)
+		ctx_priv->trani_first = trani;
+	++ctx_priv->tran_count;
+	trani->os_priv.submitted = 1;
+	SetEvent(ctx_priv->hTransferListUpdated);
+
+	LeaveCriticalSection(&ctx_priv->ctx_mutex);
 	return LIBUSBY_SUCCESS;
 }
 
 static int libusb0_cancel_transfer(libusby_transfer * tran)
 {
-	if (tran->dev_handle)
+	usbyi_transfer * trani = usbyi_tran_to_trani(tran);
+	libusb0_ctx * ctxpriv = usbyi_ctx_to_priv(trani->ctx);
+
+	EnterCriticalSection(&trani->ctx->os_priv.ctx_mutex);
+	if (trani->os_priv.submitted)
 	{
-		usbyi_transfer * trani = usbyi_tran_to_trani(tran);
-		libusb0_device_private * devpriv = usbyi_dev_to_devpriv(tran->dev_handle->dev);
-		libusb0_ctx * ctxpriv = usbyi_ctx_to_priv(tran->dev_handle->dev->ctx);
+		libusb0_device_private * devpriv;
+		assert(tran->dev_handle);
+
+		devpriv = usbyi_dev_to_devpriv(tran->dev_handle->dev);
 
 		if (ctxpriv->cancel_io_ex)
 		{
@@ -340,6 +369,8 @@ static int libusb0_cancel_transfer(libusby_transfer * tran)
 			sync_device_io_control(devpriv->hFile, LIBUSB_IOCTL_ABORT_ENDPOINT, &req, sizeof req, 0, 0);
 		}
 	}
+	LeaveCriticalSection(&trani->ctx->os_priv.ctx_mutex);
+
 	return LIBUSBY_SUCCESS;
 }
 
@@ -348,18 +379,39 @@ static void libusb0_reap_transfer(usbyi_transfer * trani)
 	libusby_transfer * tran = usbyi_trani_to_tran(trani);
 	usbyi_os_transfer * tranos = &trani->os_priv;
 	libusb0_device_private * devpriv = usbyi_dev_to_devpriv(tran->dev_handle->dev);
+	libusby_context * ctx = trani->ctx;
+	usbyi_os_ctx * ctx_priv = &ctx->os_priv;
 
 	DWORD dwTransferred;
 	BOOL res = GetOverlappedResult(devpriv->hFile, &trani->os_priv.overlapped, &dwTransferred, TRUE);
 
 	libusb0_update_finished_transfer(tran,  res? ERROR_SUCCESS: GetLastError(), dwTransferred);
-	usbyi_win32_remove_transfer(trani);
+
+	EnterCriticalSection(&ctx_priv->ctx_mutex);
+	if (trani->next)
+		trani->next->prev = trani->prev;
+	else
+		ctx_priv->trani_last = trani->prev;
+
+	if (trani->prev)
+		trani->prev->next = trani->next;
+	else
+		ctx_priv->trani_first = trani->next;
+
+	trani->next = 0;
+	trani->prev = 0;
+	--ctx_priv->tran_count;
+
+	trani->os_priv.submitted = 0;
+	LeaveCriticalSection(&ctx_priv->ctx_mutex);
 
 	if (tran->callback)
 		tran->callback(tran);
 
+	EnterCriticalSection(&ctx_priv->ctx_mutex);
 	if (!tranos->submitted)
 		SetEvent(tranos->hCompletionEvent);
+	LeaveCriticalSection(&ctx_priv->ctx_mutex);
 }
 
 usbyi_backend const libusb0_win32_backend =
@@ -373,6 +425,7 @@ usbyi_backend const libusb0_win32_backend =
 	0,
 	0,
 	&libusb0_get_descriptor,
+	&libusb0_get_descriptor_cached,
 	&libusb0_get_configuration,
 	&libusb0_set_configuration,
 	&libusb0_claim_interface,

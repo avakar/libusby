@@ -187,6 +187,8 @@ int libusby_reset_device(libusby_device_handle * dev_handle);
 
 /* USB descriptors */
 int libusby_get_device_descriptor_cached(libusby_device * dev, libusby_device_descriptor * desc);
+int libusby_get_config_descriptor_cached(libusby_device * dev, uint8_t config_index, libusby_config_descriptor ** config);
+
 int libusby_get_device_descriptor(libusby_device_handle * dev_handle, libusby_device_descriptor * desc);
 int libusby_get_active_config_descriptor(libusby_device_handle * dev_handle, libusby_config_descriptor ** config);
 int libusby_get_config_descriptor(libusby_device_handle * dev_handle, uint8_t config_index, libusby_config_descriptor ** config);

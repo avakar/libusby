@@ -571,6 +571,35 @@ int libusby_get_config_descriptor(libusby_device_handle * dev_handle, uint8_t co
 	return r;
 }
 
+int libusby_get_config_descriptor_cached(libusby_device * dev, uint8_t config_index, libusby_config_descriptor ** config)
+{
+	int r = LIBUSBY_ERROR_NOT_SUPPORTED;
+	unsigned char header[6];
+	uint16_t wTotalLength;
+	unsigned char * rawdesc;
+
+	if (dev->ctx->backend->get_descriptor_cached)
+	{
+		r = dev->ctx->backend->get_descriptor_cached(dev, 2, config_index, header, sizeof header);
+		if (r < 0)
+			return r;
+
+		wTotalLength = (header[5] << 8) | header[4];
+
+		rawdesc = malloc(wTotalLength);
+		if (!rawdesc)
+			return LIBUSBY_ERROR_NO_MEM;
+
+		r = dev->ctx->backend->get_descriptor_cached(dev, 2, config_index, rawdesc, wTotalLength);
+		if (r >= 0)
+			r = usbyi_sanitize_config_descriptor(config, rawdesc, r);
+
+		free(rawdesc);
+	}
+
+	return r;
+}
+
 void libusby_free_config_descriptor(libusby_config_descriptor * config)
 {
 	int i, j;

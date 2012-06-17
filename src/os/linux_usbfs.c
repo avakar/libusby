@@ -506,6 +506,11 @@ static int usbfs_get_descriptor(libusby_device_handle * dev_handle, uint8_t desc
     return LIBUSBY_ERROR_NOT_SUPPORTED;
 }
 
+static int usbfs_get_descriptor_cached(libusby_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
+{
+    return LIBUSBY_ERROR_NOT_SUPPORTED;
+}
+
 static int usbfs_perform_transfer(libusby_transfer * tran)
 {
     int r;
@@ -598,6 +603,7 @@ static usbyi_backend const linux_usbfs_backend = {
     &usbfs_close,
 
     &usbfs_get_descriptor,
+    &usbfs_get_descriptor_cached,
     &usbfs_get_configuration,
     &usbfs_set_configuration,
 

@@ -42,7 +42,4 @@ void usbyi_clear_os_ctx(libusby_context * ctx);
 int usbyi_init_os_transfer(usbyi_transfer * trani);
 void usbyi_clear_os_transfer(usbyi_transfer * trani);
 
-void usbyi_win32_add_transfer(usbyi_transfer * trani);
-void usbyi_win32_remove_transfer(usbyi_transfer * trani);
-
 #endif

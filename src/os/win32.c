@@ -29,50 +29,6 @@ void usbyi_clear_os_transfer(usbyi_transfer * trani)
 	CloseHandle(trani->os_priv.hCompletionEvent);
 }
 
-void usbyi_win32_add_transfer(usbyi_transfer * trani)
-{
-	libusby_context * ctx = trani->ctx;
-	usbyi_os_ctx * ctx_priv = &ctx->os_priv;
-
-	EnterCriticalSection(&ctx_priv->ctx_mutex);
-	trani->next = 0;
-	trani->prev = ctx_priv->trani_last;
-	if (ctx_priv->trani_last)
-		ctx_priv->trani_last->next = trani;
-	ctx_priv->trani_last = trani;
-	if (!ctx_priv->trani_first)
-		ctx_priv->trani_first = trani;
-	++ctx_priv->tran_count;
-	trani->os_priv.submitted = 1;
-	SetEvent(ctx_priv->hTransferListUpdated);
-	LeaveCriticalSection(&ctx_priv->ctx_mutex);
-}
-
-void usbyi_win32_remove_transfer(usbyi_transfer * trani)
-{
-	libusby_context * ctx = trani->ctx;
-	usbyi_os_ctx * ctx_priv = &ctx->os_priv;
-
-	EnterCriticalSection(&ctx_priv->ctx_mutex);
-
-	if (trani->next)
-		trani->next->prev = trani->prev;
-	else
-		ctx_priv->trani_last = trani->prev;
-
-	if (trani->prev)
-		trani->prev->next = trani->next;
-	else
-		ctx_priv->trani_first = trani->next;
-
-	trani->next = 0;
-	trani->prev = 0;
-	--ctx_priv->tran_count;
-
-	trani->os_priv.submitted = 0;
-	LeaveCriticalSection(&ctx_priv->ctx_mutex);
-}
-
 void usbyi_free_handle_list(usbyi_handle_list * handle_list)
 {
 	free(handle_list->handles);
