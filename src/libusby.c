@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <memory.h>
 #include <assert.h>
+#include "os/os.h"
 
 int usbyi_append_device_list(struct usbyi_device_list * devices, libusby_device * dev)
 {
@@ -27,11 +28,10 @@ int usbyi_append_device_list(struct usbyi_device_list * devices, libusby_device 
 	return LIBUSBY_SUCCESS;
 }
 
-libusby_device * usbyi_alloc_device(libusby_context * ctx)
+usbyb_device * usbyi_alloc_device(libusby_context * ctx)
 {
-	int alloc_size = sizeof(libusby_device) + ctx->backend->device_private_size;
-	libusby_device * res = malloc(alloc_size);
-	memset(res, 0, alloc_size);
+	libusby_device * res = malloc(usbyb_device_size);
+	memset(res, 0, usbyb_device_size);
 
 	res->ctx = ctx;
 	res->ref_count = 1;
@@ -42,12 +42,7 @@ libusby_device * usbyi_alloc_device(libusby_context * ctx)
 		return 0;
 	}
 
-	return res;
-}
-
-void * usbyi_ctx_to_priv(libusby_context * ctx)
-{
-	return ctx + 1;
+	return (usbyb_device *)res;
 }
 
 struct usbyi_transfer * usbyi_tran_to_trani(libusby_transfer * tran)
@@ -60,38 +55,17 @@ libusby_transfer * usbyi_trani_to_tran(struct usbyi_transfer * trani)
 	return (libusby_transfer *)(trani + 1);
 }
 
-void * usbyi_dev_to_devpriv(libusby_device * dev)
-{
-	return dev + 1;
-}
-
-void * usbyi_handle_to_handlepriv(libusby_device_handle * handle)
-{
-	return handle + 1;
-}
-
-int usbyi_init(libusby_context ** ctx, struct usbyi_backend const * backend)
+int libusby_init(libusby_context ** ctx)
 {
 	int r;
-
-	size_t alloc_size = sizeof(libusby_context) + backend->context_private_size;
-	libusby_context * res = malloc(alloc_size);
+	libusby_context * res = malloc(usbyb_context_size);
 	if (!res)
 		return LIBUSBY_ERROR_NO_MEM;
-	memset(res, 0, alloc_size);
+	memset(res, 0, usbyb_context_size);
 
-	res->backend = backend;
-	r = usbyi_init_os_ctx(res);
+	r = usbyb_init((usbyb_context *)res);
 	if (r < 0)
 	{
-		free(res);
-		return r;
-	}
-
-	r = backend->init(res);
-	if (r < 0)
-	{
-		usbyi_clear_os_ctx(res);
 		free(res);
 		return r;
 	}
@@ -102,8 +76,7 @@ int usbyi_init(libusby_context ** ctx, struct usbyi_backend const * backend)
 
 void libusby_exit(libusby_context * ctx)
 {
-	ctx->backend->exit(ctx);
-	usbyi_clear_os_ctx(ctx);
+	usbyb_exit((usbyb_context *)ctx);
 	free(ctx->devices.list);
 	free(ctx);
 }
@@ -116,7 +89,7 @@ libusby_transfer * libusby_alloc_transfer(libusby_context * ctx, int iso_packets
 		return NULL;
 
 	memset(res, 0, alloc_size);
-	if (usbyi_init_os_transfer(res) < 0)
+	if (usbyb_init_transfer(res) < 0)
 	{
 		free(res);
 		return NULL;
@@ -130,7 +103,7 @@ libusby_transfer * libusby_alloc_transfer(libusby_context * ctx, int iso_packets
 void libusby_free_transfer(libusby_transfer * transfer)
 {
 	struct usbyi_transfer * trani = usbyi_tran_to_trani(transfer);
-	usbyi_clear_os_transfer(trani);
+	usbyb_clear_transfer(trani);
 	free(trani);
 }
 
@@ -152,26 +125,24 @@ void libusby_fill_bulk_transfer(libusby_transfer * transfer, libusby_device_hand
 		memset(transfer->iso_packet_desc, 0, sizeof(libusby_iso_packet_descriptor)*transfer->num_iso_packets);
 }
 
-int libusby_perform_transfer(libusby_transfer * tran)
+int libusby_perform_transfer(usbyb_transfer * tran)
 {
-	if (tran->dev_handle->dev->ctx->backend->perform_transfer)
+	int r = usbyb_perform_transfer(tran);
+	if (r == LIBUSBY_ERROR_NOT_SUPPORTED)
 	{
-		return tran->dev_handle->dev->ctx->backend->perform_transfer(tran);
+		r = libusby_submit_transfer(tran);
+		if (r >= 0)
+			r = libusby_wait_for_transfer(tran);
 	}
-	else
-	{
-		int r = libusby_submit_transfer(tran);
-		if (r < 0)
-			return r;
-		return libusby_wait_for_transfer(tran);
-	}
+	return r;
 }
 
 int libusby_bulk_transfer(libusby_device_handle * dev_handle, libusby_endpoint_t endpoint, uint8_t * data, int length, int * transferred, libusby_timeout_t timeout)
 {
 	int r;
 
-	libusby_transfer * tran = libusby_alloc_transfer(dev_handle->dev->ctx, 0);
+    libusby_device * dev = libusby_get_device(dev_handle);
+    libusby_transfer * tran = libusby_alloc_transfer(dev->ctx, 0);
 	if (!tran)
 		return LIBUSBY_ERROR_NO_MEM;
 	libusby_fill_bulk_transfer(tran, dev_handle, endpoint, data, length, 0, 0, timeout);
@@ -186,28 +157,27 @@ int libusby_bulk_transfer(libusby_device_handle * dev_handle, libusby_endpoint_t
 
 int libusby_submit_transfer(libusby_transfer * transfer)
 {
-	return transfer->dev_handle->dev->ctx->backend->submit_transfer(transfer);
+	return usbyb_submit_transfer(transfer);
 }
 
 int libusby_cancel_transfer(libusby_transfer * transfer)
 {
-	struct usbyi_transfer * trani = usbyi_tran_to_trani(transfer);
-	return trani->ctx->backend->cancel_transfer(transfer);
+	return usbyb_cancel_transfer(transfer);
 }
 
 int libusby_claim_interface(libusby_device_handle * dev_handle, int interface_number)
 {
-	return dev_handle->dev->ctx->backend->claim_interface(dev_handle, interface_number);
+	return usbyb_claim_interface((usbyb_device_handle *)dev_handle, interface_number);
 }
 
 int libusby_release_interface(libusby_device_handle * dev_handle, int interface_number)
 {
-	return dev_handle->dev->ctx->backend->release_interface(dev_handle, interface_number);
+	return usbyb_release_interface((usbyb_device_handle *)dev_handle, interface_number);
 }
 
 libusby_device * libusby_get_device(libusby_device_handle * dev_handle)
 {
-	return dev_handle->dev;
+	return (libusby_device *)dev_handle->dev;
 }
 
 void libusby_free_device_list(libusby_device ** list, int unref_devices)
@@ -259,24 +229,19 @@ int libusby_get_device_descriptor_cached(libusby_device * dev, libusby_device_de
 
 int libusby_open(libusby_device * dev, libusby_device_handle ** dev_handle)
 {
-	libusby_context * ctx = dev->ctx;
-	int alloc_size = sizeof(libusby_device_handle) + ctx->backend->device_handle_private_size;
-
-	libusby_device_handle * res = malloc(alloc_size);
+	int r;
+	libusby_device_handle * res = malloc(usbyb_device_handle_size);
 	if (!res)
 		return LIBUSBY_ERROR_NO_MEM;
-	memset(res, 0, alloc_size);
+	memset(res, 0, usbyb_device_handle_size);
 
-	res->dev = dev;
+	res->dev = (usbyb_device *)dev;
 
-	if (dev->ctx->backend->open)
+	r = usbyb_open((usbyb_device_handle *)res);
+	if (r < 0)
 	{
-		int r = dev->ctx->backend->open(res);
-		if (r < 0)
-		{
-			free(res);
-			return r;
-		}
+		free(res);
+		return r;
 	}
 
 	libusby_ref_device(dev);
@@ -332,20 +297,20 @@ libusby_device_handle * libusby_open_device_with_vid_pid(libusby_context * ctx, 
 
 void libusby_close(libusby_device_handle * dev_handle)
 {
-	if (dev_handle->dev->ctx->backend->close)
-		dev_handle->dev->ctx->backend->close(dev_handle);
-	libusby_unref_device(dev_handle->dev);
+	usbyb_close((usbyb_device_handle *)dev_handle);
+	libusby_unref_device(libusby_get_device(dev_handle));
 	free(dev_handle);
 }
 
 int libusby_get_device_list(libusby_context * ctx, libusby_device *** list)
 {
-	return ctx->backend->get_device_list(ctx, list);
+	return usbyb_get_device_list((usbyb_context *)ctx, list);
 }
 
 int libusby_get_device_descriptor(libusby_device_handle * dev_handle, libusby_device_descriptor * desc)
 {
-	if (libusby_get_device_descriptor_cached(dev_handle->dev, desc) == LIBUSBY_SUCCESS)
+	libusby_device * dev = libusby_get_device(dev_handle);
+	if (libusby_get_device_descriptor_cached(dev, desc) == LIBUSBY_SUCCESS)
 		return LIBUSBY_SUCCESS;
 
 	{
@@ -354,12 +319,12 @@ int libusby_get_device_descriptor(libusby_device_handle * dev_handle, libusby_de
 		if (r < 0)
 			return r;
 
-		r = usbyi_sanitize_device_desc(&dev_handle->dev->device_desc, rawdesc);
+		r = usbyi_sanitize_device_desc(&dev->device_desc, rawdesc);
 		if (r < 0)
 			return r;
 	}
 
-	memcpy(desc, &dev_handle->dev->device_desc, sizeof dev_handle->dev->device_desc);
+	memcpy(desc, &dev->device_desc, sizeof dev->device_desc);
 	return LIBUSBY_SUCCESS;
 }
 
@@ -377,7 +342,8 @@ int libusby_control_transfer(libusby_device_handle * dev_handle, uint8_t bmReque
 	int r;
 
 	uint8_t * buffer = 0;
-	libusby_transfer * tran = libusby_alloc_transfer(dev_handle->dev->ctx, 0);
+    libusby_device * dev = libusby_get_device(dev_handle);
+	libusby_transfer * tran = libusby_alloc_transfer(dev->ctx, 0);
 	if (!tran)
 		return LIBUSBY_ERROR_NO_MEM;
 
@@ -422,9 +388,7 @@ int libusby_control_transfer(libusby_device_handle * dev_handle, uint8_t bmReque
 
 int libusby_get_descriptor(libusby_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
 {
-	int r = LIBUSBY_ERROR_NOT_SUPPORTED;
-	if (dev_handle->dev->ctx->backend->get_descriptor)
-		r = dev_handle->dev->ctx->backend->get_descriptor(dev_handle, desc_type, desc_index, data, length);
+	int r = usbyb_get_descriptor((usbyb_device_handle *)dev_handle, desc_type, desc_index, data, length);
 	if (r == LIBUSBY_ERROR_NOT_SUPPORTED)
 		r = libusby_control_transfer(dev_handle, 0x80, 6/*GET_DESCRIPTOR*/, desc_index | (desc_type << 8), 0, data, length, 0);
 	return r;
@@ -578,25 +542,21 @@ int libusby_get_config_descriptor_cached(libusby_device * dev, uint8_t config_in
 	uint16_t wTotalLength;
 	unsigned char * rawdesc;
 
-	if (dev->ctx->backend->get_descriptor_cached)
-	{
-		r = dev->ctx->backend->get_descriptor_cached(dev, 2, config_index, header, sizeof header);
-		if (r < 0)
-			return r;
+	r = usbyb_get_descriptor_cached((usbyb_device *)dev, 2, config_index, header, sizeof header);
+	if (r < 0)
+		return r;
 
-		wTotalLength = (header[5] << 8) | header[4];
+	wTotalLength = (header[5] << 8) | header[4];
 
-		rawdesc = malloc(wTotalLength);
-		if (!rawdesc)
-			return LIBUSBY_ERROR_NO_MEM;
+	rawdesc = malloc(wTotalLength);
+	if (!rawdesc)
+		return LIBUSBY_ERROR_NO_MEM;
 
-		r = dev->ctx->backend->get_descriptor_cached(dev, 2, config_index, rawdesc, wTotalLength);
-		if (r >= 0)
-			r = usbyi_sanitize_config_descriptor(config, rawdesc, r);
+	r = usbyb_get_descriptor_cached((usbyb_device *)dev, 2, config_index, rawdesc, wTotalLength);
+	if (r >= 0)
+		r = usbyi_sanitize_config_descriptor(config, rawdesc, r);
 
-		free(rawdesc);
-	}
-
+	free(rawdesc);
 	return r;
 }
 
@@ -666,10 +626,7 @@ int libusby_get_config_descriptor_by_value(libusby_device_handle * dev_handle, u
 
 int libusby_get_configuration(libusby_device_handle * dev_handle, int * config_value)
 {
-	int r = LIBUSBY_ERROR_NOT_SUPPORTED;
-	if (dev_handle->dev->ctx->backend->get_configuration)
-		r = dev_handle->dev->ctx->backend->get_configuration(dev_handle, config_value, /*cached_only=*/0);
-
+	int r = usbyb_get_configuration((usbyb_device_handle *)dev_handle, config_value, /*cached_only=*/0);
 	if (r == LIBUSBY_ERROR_NOT_SUPPORTED)
 	{
 		uint8_t data;
@@ -689,10 +646,7 @@ int libusby_get_configuration(libusby_device_handle * dev_handle, int * config_v
 
 int libusby_set_configuration(libusby_device_handle * dev_handle, int config_value)
 {
-	int r = LIBUSBY_ERROR_NOT_SUPPORTED;
-	if (dev_handle->dev->ctx->backend->set_configuration)
-		r = dev_handle->dev->ctx->backend->set_configuration(dev_handle, config_value);
-
+	int r = usbyb_set_configuration((usbyb_device_handle *)dev_handle, config_value);
 	if (r == LIBUSBY_ERROR_NOT_SUPPORTED)
 	{
 		r = libusby_control_transfer(dev_handle, 0x80, 9/*SET_CONFIGURATION*/, config_value, 0, 0, 0, 0);
@@ -707,8 +661,5 @@ int libusby_set_configuration(libusby_device_handle * dev_handle, int config_val
 
 int libusby_get_configuration_cached(libusby_device_handle * dev_handle, int * config_value)
 {
-	int r = LIBUSBY_ERROR_NOT_SUPPORTED;
-	if (dev_handle->dev->ctx->backend->get_configuration)
-		r = dev_handle->dev->ctx->backend->get_configuration(dev_handle, config_value, /*cached_only=*/1);
-	return r;
+	return usbyb_get_configuration((usbyb_device_handle *)dev_handle, config_value, /*cached_only=*/1);
 }
