@@ -18,6 +18,7 @@ int usbyb_init(usbyb_context * ctx);
 void usbyb_exit(usbyb_context * ctx);
 
 int usbyb_get_device_list(usbyb_context * ctx, libusby_device *** list);
+void usbyb_finalize_device(usbyb_device * dev);
 
 int usbyb_open(usbyb_device_handle *dev_handle); // opt
 void usbyb_close(usbyb_device_handle *dev_handle); // opt

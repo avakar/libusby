@@ -209,6 +209,7 @@ void libusby_unref_device(libusby_device * dev)
 			}
 		}
 	}
+	usbyb_finalize_device((usbyb_device *)dev);
 	free(dev);
 }
 
@@ -515,7 +516,7 @@ int libusby_get_config_descriptor(libusby_device_handle * dev_handle, uint8_t co
 	if (r < 0)
 		return r;
 
-	wTotalLength = (header[5] << 8) | header[4];
+	wTotalLength = (header[3] << 8) | header[2];
 
 	rawdesc = malloc(wTotalLength);
 	if (!rawdesc)
@@ -540,7 +541,7 @@ int libusby_get_config_descriptor_cached(libusby_device * dev, uint8_t config_in
 	if (r < 0)
 		return r;
 
-	wTotalLength = (header[5] << 8) | header[4];
+	wTotalLength = (header[3] << 8) | header[2];
 
 	rawdesc = malloc(wTotalLength);
 	if (!rawdesc)

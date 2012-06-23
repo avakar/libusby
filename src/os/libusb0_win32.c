@@ -239,6 +239,11 @@ error:
 	return LIBUSBY_ERROR_NO_MEM;
 }
 
+void usbyb_finalize_device(usbyb_device * dev)
+{
+	(void)dev;
+}
+
 int usbyb_claim_interface(usbyb_device_handle * dev_handle, int interface_number)
 {
 	usbyb_device * dev = dev_handle->pub.dev;

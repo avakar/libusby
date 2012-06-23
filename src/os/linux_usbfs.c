@@ -1,6 +1,8 @@
 #include "os.h"
 #include "../libusbyi.h"
 #include <assert.h>
+#include <string.h>
+#include <stdint.h>
 
 #define _GNU_SOURCE
 #include <poll.h>
@@ -14,7 +16,6 @@
 #include <stdio.h>
 #include <linux/usbdevice_fs.h>
 #include <pthread.h>
-#include <string.h>
 
 struct watched_fd
 {
@@ -45,6 +46,8 @@ struct usbyb_device
     int busno;
     int devno;
     int fd;
+
+    uint8_t * desc_cache;
 };
 
 struct usbyb_device_handle
@@ -106,7 +109,7 @@ static int usbfs_run_event_loop_impl(usbyb_context * ctx, usbyb_transfer * watch
         pthread_cond_wait(&ctx->ctx_cond, &ctx->ctx_mutex);
     ctx->loop_locked = 1;
 
-    while (watch_tran->active && r >= 0 && ctx->loop_enabled)
+    while ((!watch_tran || watch_tran->active) && r >= 0 && ctx->loop_enabled)
     {
         int fdcount = ctx->watched_fd_count;
 
@@ -283,7 +286,7 @@ int usbyb_get_device_list(usbyb_context * ctx, libusby_device *** list)
     DIR * busdir = 0;
     struct dirent * ent;
     int fd = -1;
-    int r;
+    int r = LIBUSBY_SUCCESS;
 
     memset(&devlist, 0, sizeof devlist);
     dir = opendir("/dev/bus/usb");
@@ -293,7 +296,7 @@ int usbyb_get_device_list(usbyb_context * ctx, libusby_device *** list)
         return LIBUSBY_SUCCESS;
     }
 
-    while ((ent = readdir(dir)))
+    while (r >= 0 && (ent = readdir(dir)))
     {
         char fname[2*NAME_MAX+32];
         struct dirent * busent;
@@ -310,7 +313,7 @@ int usbyb_get_device_list(usbyb_context * ctx, libusby_device *** list)
         if (!busdir)
             continue;
 
-        while ((busent = readdir(busdir)))
+        while (r >= 0 && (busent = readdir(busdir)))
         {
             int i;
             int devno = strtol(busent->d_name, &end, 10);
@@ -342,28 +345,60 @@ int usbyb_get_device_list(usbyb_context * ctx, libusby_device *** list)
 
             if (i == ctx->pub.devices.count)
             {
-                usbyb_device * dev = usbyi_alloc_device(&ctx->pub);
+                usbyb_device * dev;
+                int i;
+                size_t cache_len = 0;
+
+                dev = usbyi_alloc_device(&ctx->pub);
                 if (!dev)
                 {
                     r = LIBUSBY_ERROR_NO_MEM;
                     goto error;
                 }
 
-                r = usbyi_append_device_list(&devlist, &dev->pub);
-                if (r < 0)
-                {
-                    libusby_unref_device(&dev->pub);
-                    continue;
-                }
-
                 dev->busno = busno;
                 dev->devno = devno;
                 dev->fd = fd;
 
+                /* Note that the device descriptor is read in host-endian. */
+                if (read(fd, &dev->pub.device_desc, sizeof dev->pub.device_desc) != sizeof dev->pub.device_desc)
+                    goto error_unref_dev;
+
+                for (i = 0; i < dev->pub.device_desc.bNumConfigurations; ++i)
                 {
-                    uint8_t rawdesc[0x12]; // XXX
-                    if (read(fd, rawdesc, sizeof rawdesc) == sizeof rawdesc)
-                        usbyi_sanitize_device_desc(&dev->pub.device_desc, rawdesc);
+                    uint8_t config_header[4];
+                    uint16_t wTotalLength;
+                    uint8_t * cache;
+
+                    if (read(fd, config_header, sizeof config_header) != sizeof config_header)
+                        goto error_unref_dev;
+                    wTotalLength = config_header[2] | (config_header[3] << 8);
+                    if (wTotalLength < sizeof config_header)
+                        goto error_unref_dev;
+
+                    cache = realloc(dev->desc_cache, cache_len + wTotalLength);
+                    if (!cache)
+                    {
+                        r = LIBUSBY_ERROR_NO_MEM;
+                        goto error_unref_dev;
+                    }
+                    dev->desc_cache = cache;
+
+                    memcpy(dev->desc_cache + cache_len, config_header, sizeof config_header);
+                    if (read(fd, dev->desc_cache + cache_len + sizeof config_header, wTotalLength - sizeof config_header)
+                            != (int)(wTotalLength - sizeof config_header))
+                    {
+                        goto error_unref_dev;
+                    }
+
+                    cache_len += wTotalLength;
+                }
+
+                r = usbyi_append_device_list(&devlist, &dev->pub);
+                if (r < 0)
+                {
+error_unref_dev:
+                    libusby_unref_device(&dev->pub);
                 }
             }
         }
@@ -384,6 +419,11 @@ error:
     if (devlist.list)
         libusby_free_device_list(devlist.list, 1);
     return r;
+}
+
+void usbyb_finalize_device(usbyb_device * dev)
+{
+    free(dev->desc_cache);
 }
 
 static int usbfs_error()
@@ -506,22 +546,34 @@ void usbyb_close(usbyb_device_handle * handle)
 
 int usbyb_get_descriptor(usbyb_device_handle * handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
 {
-    (void)handle;
-    (void)desc_type;
-    (void)desc_index;
-    (void)data;
-    (void)length;
-    return LIBUSBY_ERROR_NOT_SUPPORTED;
+    return usbyb_get_descriptor_cached(handle->pub.dev, desc_type, desc_index, data, length);
 }
 
 int usbyb_get_descriptor_cached(usbyb_device * dev, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
 {
-    (void)dev;
-    (void)desc_type;
-    (void)desc_index;
-    (void)data;
-    (void)length;
-    return LIBUSBY_ERROR_NOT_SUPPORTED;
+    int i;
+    uint8_t * cache_ptr = dev->desc_cache;
+
+    if (desc_type != 2/*CONFIGURATION*/)
+        return LIBUSBY_ERROR_NOT_SUPPORTED;
+
+
+    for (i = 0; i < dev->pub.device_desc.bNumConfigurations; ++i)
+    {
+        uint16_t wTotalLength = cache_ptr[2] | (cache_ptr[3] << 8);
+
+        if (i == desc_index)
+        {
+            if (length > wTotalLength)
+                length = wTotalLength;
+            memcpy(data, cache_ptr, length);
+            return length;
+        }
+
+        cache_ptr += wTotalLength;
+    }
+
+    return LIBUSBY_ERROR_INVALID_PARAM;
 }
 
 int usbyb_perform_transfer(usbyb_transfer * tran)
