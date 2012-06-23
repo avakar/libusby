@@ -15,9 +15,9 @@ typedef struct usbyi_handle_list
 	HANDLE * handles;
 } usbyi_handle_list;
 
-struct usbyb_context
+struct libusby_context
 {
-	libusby_context pub;
+	usbyi_device_list_node devlist_head;
 
 	HMODULE hKernel32;
 	cancel_io_ex_t * cancel_io_ex;
@@ -38,6 +38,7 @@ struct usbyb_context
 struct usbyb_device
 {
 	libusby_device pub;
+	usbyi_device_list_node devnode;
 	int devno;
 	HANDLE hFile;
 };
@@ -99,6 +100,8 @@ static int sync_device_io_control(HANDLE hFile, DWORD dwControlCode, void const 
 
 int usbyb_init(usbyb_context * ctx)
 {
+	usbyi_init_devlist_head(&ctx->devlist_head);
+
 	ctx->hKernel32 = LoadLibraryW(L"kernel32.dll");
 	if (!ctx->hKernel32)
 		return LIBUSBY_ERROR_INVALID_PARAM;
@@ -120,6 +123,8 @@ int usbyb_init(usbyb_context * ctx)
 	return LIBUSBY_SUCCESS;
 
 error:
+	if (ctx->hTransferListUpdated)
+		CloseHandle(ctx->hTransferListUpdated);
 	if (ctx->hEventLoopStopped)
 		CloseHandle(ctx->hEventLoopStopped);
 	if (ctx->hReaperLock)
@@ -130,7 +135,9 @@ error:
 
 void usbyb_exit(usbyb_context * ctx)
 {
+	assert(ctx->devlist_head.next == &ctx->devlist_head);
 	DeleteCriticalSection(&ctx->ctx_mutex);
+	CloseHandle(ctx->hTransferListUpdated);
 	CloseHandle(ctx->hEventLoopStopped);
 	CloseHandle(ctx->hReaperLock);
 	FreeLibrary(ctx->hKernel32);
@@ -184,8 +191,8 @@ int usbyb_get_device_list(usbyb_context * ctx, libusby_device *** list)
 	int i;
 	for (i = 1; i < LIBUSB_MAX_NUMBER_OF_DEVICES; ++i)
 	{
-		int j;
 		HANDLE hFile;
+		usbyi_device_list_node * devnode = 0;
 
 		WCHAR devname[32];
 		wsprintf(devname, L"\\\\.\\libusb0-%04d", i);
@@ -194,54 +201,66 @@ int usbyb_get_device_list(usbyb_context * ctx, libusby_device *** list)
 		if (hFile == INVALID_HANDLE_VALUE)
 			continue;
 
-		for (j = 0; j < ctx->pub.devices.count; ++j)
+		EnterCriticalSection(&ctx->ctx_mutex);
+		for (devnode = ctx->devlist_head.next; devnode != &ctx->devlist_head; devnode = devnode->next)
 		{
-			usbyb_device * dev = (usbyb_device *)ctx->pub.devices.list[j];
+			usbyb_device * dev = container_of(devnode, usbyb_device, devnode);
 
 			if (dev->devno == i)
 			{
-				if (usbyi_append_device_list(&devlist, ctx->pub.devices.list[j]) < 0)
-					goto error;
-				libusby_ref_device(ctx->pub.devices.list[j]);
+				CloseHandle(hFile);
+				if (usbyi_append_device_list(&devlist, &dev->pub) < 0)
+					goto error_unlock;
+				libusby_ref_device(&dev->pub);
 				break;
 			}
 		}
 
-		if (j == ctx->pub.devices.count)
+		if (devnode == &ctx->devlist_head)
 		{
 			uint8_t cached_desc[sizeof(libusby_device_descriptor)];
-			usbyb_device * newdev = usbyi_alloc_device(&ctx->pub);
+			usbyb_device * dev = usbyi_alloc_device(ctx);
+			if (!dev)
+				goto error_unlock;
 
-			if (!newdev)
-				continue;
+			dev->devno = i;
+			dev->hFile = hFile;
+			usbyi_insert_before_devlist_node(&dev->devnode, &ctx->devlist_head);
 
 			if (usbyb_get_descriptor_with_handle(hFile, 1, 0, cached_desc, sizeof cached_desc) != sizeof cached_desc
-				|| usbyi_sanitize_device_desc(&newdev->pub.device_desc, cached_desc) < 0
-				|| usbyi_append_device_list(&devlist, &newdev->pub) < 0)
+				|| usbyi_sanitize_device_desc(&dev->pub.device_desc, cached_desc) < 0
+				|| usbyi_append_device_list(&devlist, &dev->pub) < 0)
 			{
-				libusby_unref_device(&newdev->pub);
-				CloseHandle(hFile);
-			}
-			else
-			{
-				newdev->devno = i;
-				newdev->hFile = hFile;
+				LeaveCriticalSection(&ctx->ctx_mutex);
+				libusby_unref_device(&dev->pub);
+				goto error;
 			}
 		}
+
+		LeaveCriticalSection(&ctx->ctx_mutex);
 	}
 
 	*list = devlist.list;
 	return devlist.count;
 
+error_unlock:
+	LeaveCriticalSection(&ctx->ctx_mutex);
+
 error:
 	if (devlist.list)
-		libusby_free_device_list(devlist.list, 1);
+		libusby_free_device_list(devlist.list, /*unref_devices=*/1);
 	return LIBUSBY_ERROR_NO_MEM;
 }
 
 void usbyb_finalize_device(usbyb_device * dev)
 {
-	(void)dev;
+	usbyb_context * ctx = dev->pub.ctx;
+
+	EnterCriticalSection(&ctx->ctx_mutex);
+	usbyi_remove_devlist_node(&dev->devnode);
+	LeaveCriticalSection(&ctx->ctx_mutex);
+
+	CloseHandle(dev->hFile);
 }
 
 int usbyb_claim_interface(usbyb_device_handle * dev_handle, int interface_number)

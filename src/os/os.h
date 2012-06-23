@@ -3,7 +3,7 @@
 
 #include "../libusby.h"
 
-typedef struct usbyb_context usbyb_context;
+typedef struct libusby_context usbyb_context;
 typedef struct usbyb_device usbyb_device;
 typedef struct usbyb_device_handle usbyb_device_handle;
 typedef struct usbyb_transfer usbyb_transfer;

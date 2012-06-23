@@ -5,6 +5,28 @@
 #include <assert.h>
 #include "os/os.h"
 
+void usbyi_init_devlist_head(usbyi_device_list_node * head)
+{
+	head->next = head;
+	head->prev = head;
+}
+
+usbyi_device_list_node * usbyi_remove_devlist_node(usbyi_device_list_node * dev_node)
+{
+	usbyi_device_list_node * next = dev_node->next;
+	dev_node->next->prev = dev_node->prev;
+	dev_node->prev->next = dev_node->next;
+	return next;
+}
+
+void usbyi_insert_before_devlist_node(usbyi_device_list_node * node, usbyi_device_list_node * next)
+{
+	node->next = next;
+	node->prev = next->prev;
+	next->prev = node;
+	node->prev->next = node;
+}
+
 int usbyi_append_device_list(struct usbyi_device_list * devices, libusby_device * dev)
 {
 	assert(devices->count <= devices->capacity);
@@ -35,13 +57,6 @@ usbyb_device * usbyi_alloc_device(libusby_context * ctx)
 
 	res->ctx = ctx;
 	res->ref_count = 1;
-
-	if (usbyi_append_device_list(&ctx->devices, res) < 0)
-	{
-		free(res);
-		return 0;
-	}
-
 	return (usbyb_device *)res;
 }
 
@@ -67,7 +82,6 @@ int libusby_init(libusby_context ** ctx)
 void libusby_exit(libusby_context * ctx)
 {
 	usbyb_exit((usbyb_context *)ctx);
-	free(ctx->devices.list);
 	free(ctx);
 }
 
@@ -194,23 +208,11 @@ libusby_device * libusby_ref_device(libusby_device * dev)
 
 void libusby_unref_device(libusby_device * dev)
 {
-	if (--dev->ref_count)
-		return;
-
+	if (--dev->ref_count == 0)
 	{
-		int i;
-		for (i = 0; i < dev->ctx->devices.count; ++i)
-		{
-			if (dev->ctx->devices.list[i] == dev)
-			{
-				dev->ctx->devices.list[i] = dev->ctx->devices.list[--dev->ctx->devices.count];
-				dev->ctx->devices.list[dev->ctx->devices.count] = 0;
-				break;
-			}
-		}
+		usbyb_finalize_device((usbyb_device *)dev);
+		free(dev);
 	}
-	usbyb_finalize_device((usbyb_device *)dev);
-	free(dev);
 }
 
 int libusby_get_device_descriptor_cached(libusby_device * dev, libusby_device_descriptor * desc)

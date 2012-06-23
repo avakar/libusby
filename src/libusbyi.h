@@ -6,6 +6,8 @@
 #include <stddef.h>
 #include "os/os.h"
 
+#define container_of(ptr, type, member) ((type *)((char *)ptr - offsetof(type, member)))
+
 struct usbyi_device_list
 {
 	int count;
@@ -13,11 +15,15 @@ struct usbyi_device_list
 	libusby_device ** list;
 };
 
-struct libusby_context
+typedef struct usbyi_device_list_node
 {
-	// XXX: devicelist lock
-	usbyi_device_list devices;
-};
+	struct usbyi_device_list_node * prev;
+	struct usbyi_device_list_node * next;
+} usbyi_device_list_node;
+
+void usbyi_init_devlist_head(usbyi_device_list_node * head);
+void usbyi_insert_before_devlist_node(usbyi_device_list_node * node, usbyi_device_list_node * next);
+usbyi_device_list_node * usbyi_remove_devlist_node(usbyi_device_list_node * dev_node);
 
 struct libusby_device
 {
