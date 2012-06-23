@@ -6,8 +6,7 @@ HEADERS += $$PWD/src/libusb.h \
 INCLUDEPATH += $$PWD/src
 
 win32 {
-    SOURCES += $$PWD/src/os/libusb0_win32.c \
-        $$PWD/src/os/win32.c
+    SOURCES += $$PWD/src/os/libusb0_win32.c
     HEADERS += $$PWD/src/os/libusb0_win32.h \
         $$PWD/src/os/libusb0_win32_intf.h \
         $$PWD/src/os/win32.h

@@ -202,7 +202,7 @@ int libusby_get_string_descriptor(libusby_device_handle * dev_handle, uint8_t de
 libusby_transfer * libusby_alloc_transfer(libusby_context * ctx, int iso_packets);
 void libusby_free_transfer(libusby_transfer * transfer);
 int libusby_submit_transfer(libusby_transfer * transfer);
-int libusby_wait_for_transfer(libusby_transfer * transfer);
+int libusby_wait_for_transfer(libusby_transfer * transfer); // XXX: perhaps this shouldn't return error?
 int libusby_perform_transfer(libusby_transfer * transfer);
 int libusby_cancel_transfer(libusby_transfer * transfer);
 uint8_t * libusby_control_transfer_get_data(libusby_transfer * transfer);
