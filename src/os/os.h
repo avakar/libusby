@@ -1,6 +1,8 @@
 #ifndef LIBUSBY_OS_OS_H
 #define LIBUSBY_OS_OS_H
 
+#include "../libusby.h"
+
 typedef struct usbyb_context usbyb_context;
 typedef struct usbyb_device usbyb_device;
 typedef struct usbyb_device_handle usbyb_device_handle;
@@ -38,7 +40,7 @@ int usbyb_run_event_loop(usbyb_context * ctx);
 void usbyb_stop_event_loop(usbyb_context * ctx);
 void usbyb_reset_event_loop(usbyb_context * ctx);
 
-int usbyb_init_transfer(usbyb_transfer * trani);
-void usbyb_clear_transfer(usbyb_transfer * trani);
+int usbyb_init_transfer(usbyb_transfer * tran);
+void usbyb_clear_transfer(usbyb_transfer * tran);
 
 #endif

@@ -1,5 +1,6 @@
-#include "linux_usbfs.h"
+#include "os.h"
 #include "../libusbyi.h"
+#include <assert.h>
 
 #define _GNU_SOURCE
 #include <poll.h>
@@ -12,6 +13,8 @@
 #include <errno.h>
 #include <stdio.h>
 #include <linux/usbdevice_fs.h>
+#include <pthread.h>
+#include <string.h>
 
 struct watched_fd
 {
@@ -19,8 +22,10 @@ struct watched_fd
     int refcount;
 };
 
-typedef struct usbfs_ctx_private
+struct usbyb_context
 {
+    libusby_context pub;
+
     pthread_mutex_t ctx_mutex;
     pthread_cond_t ctx_cond;
     int loop_enabled;
@@ -31,68 +36,79 @@ typedef struct usbfs_ctx_private
     int watched_fd_capacity;
 
     int pipe[2];
-} usbfs_ctx_private;
+};
 
-typedef struct usbfs_device_private
+struct usbyb_device
 {
+    libusby_device pub;
+
     int busno;
     int devno;
     int fd;
-} usbfs_device_private;
+};
 
-typedef struct usbfs_devhandle_private
+struct usbyb_device_handle
 {
+    libusby_device_handle pub;
+
     int wrfd;
     int active_config_value;
-} usbfs_devhandle_private;
+};
 
-int usbyi_init_os_ctx(libusby_context * ctx)
+struct usbyb_transfer
 {
-    return LIBUSBY_SUCCESS;
-}
+    usbyi_transfer intrn;
 
-void usbyi_clear_os_ctx(libusby_context * ctx)
-{
-}
+    pthread_cond_t cond;
+    int active;
+    struct usbdevfs_urb req;
 
-int usbyi_init_os_transfer(usbyi_transfer * tran)
+    libusby_transfer pub;
+};
+
+int const usbyb_context_size = sizeof(usbyb_context);
+int const usbyb_device_size = sizeof(usbyb_device);
+int const usbyb_device_handle_size = sizeof(usbyb_device_handle);
+int const usbyb_transfer_size = sizeof(usbyb_transfer);
+int const usbyb_transfer_pub_offset = offsetof(usbyb_transfer, pub);
+
+int usbyb_init_transfer(usbyb_transfer * tran)
 {
-    if (pthread_cond_init(&tran->os_priv.cond, 0) != 0)
+    if (pthread_cond_init(&tran->cond, 0) != 0)
         return LIBUSBY_ERROR_NO_MEM;
 
-    tran->os_priv.active = 0;
+    tran->active = 0;
     return LIBUSBY_SUCCESS;
 }
 
-void usbyi_clear_os_transfer(usbyi_transfer * tran)
+void usbyb_clear_transfer(usbyb_transfer * tran)
 {
-    pthread_cond_destroy(&tran->os_priv.cond);
+    pthread_cond_destroy(&tran->cond);
 }
 
-static void usbfs_unwatch_fd(usbfs_ctx_private * ctxpriv, int fdindex)
+static void usbfs_unwatch_fd(usbyb_context * ctx, int fdindex)
 {
-    if (--ctxpriv->watched_fds[fdindex].refcount == 0)
+    if (--ctx->watched_fds[fdindex].refcount == 0)
     {
-        if (--ctxpriv->watched_fd_count)
-            ctxpriv->watched_fds[fdindex] = ctxpriv->watched_fds[ctxpriv->watched_fd_count];
+        if (--ctx->watched_fd_count)
+            ctx->watched_fds[fdindex] = ctx->watched_fds[ctx->watched_fd_count];
     }
 }
 
-int libusby_run_event_loop_impl(libusby_context * ctx, libusby_transfer * tran)
+static int usbfs_run_event_loop_impl(usbyb_context * ctx, usbyb_transfer * watch_tran)
 {
-    usbfs_ctx_private * ctxpriv = usbyi_ctx_to_priv(ctx);
     struct pollfd * pollfds = 0;
     int pollfds_cap = 0;
     int i;
     int r = LIBUSBY_SUCCESS;
 
-    while (ctxpriv->loop_enabled && ctxpriv->loop_locked)
-        pthread_cond_wait(&ctxpriv->ctx_cond, &ctxpriv->ctx_mutex);
-    ctxpriv->loop_locked = 1;
+    while (ctx->loop_enabled && ctx->loop_locked)
+        pthread_cond_wait(&ctx->ctx_cond, &ctx->ctx_mutex);
+    ctx->loop_locked = 1;
 
-    while (r >= 0 && ctxpriv->loop_enabled)
+    while (watch_tran->active && r >= 0 && ctx->loop_enabled)
     {
-        int fdcount = ctxpriv->watched_fd_count;
+        int fdcount = ctx->watched_fd_count;
 
         if (pollfds_cap < fdcount + 1)
         {
@@ -108,18 +124,18 @@ int libusby_run_event_loop_impl(libusby_context * ctx, libusby_transfer * tran)
             pollfds_cap = fdcount + 1;
         }
 
-        pollfds[fdcount].fd = ctxpriv->pipe[0];
+        pollfds[fdcount].fd = ctx->pipe[0];
         pollfds[fdcount].events = POLLIN;
         pollfds[fdcount].revents = 0;
 
         for (i = 0; i < fdcount; ++i)
         {
-            pollfds[i].fd = ctxpriv->watched_fds[i].fd;
+            pollfds[i].fd = ctx->watched_fds[i].fd;
             pollfds[i].events = POLLOUT;
             pollfds[i].revents = 0;
         }
 
-        pthread_mutex_unlock(&ctxpriv->ctx_mutex);
+        pthread_mutex_unlock(&ctx->ctx_mutex);
 
         if (poll(pollfds, fdcount+1, -1) < 0)
         {
@@ -130,8 +146,7 @@ int libusby_run_event_loop_impl(libusby_context * ctx, libusby_transfer * tran)
             for (i = 0; i < fdcount; ++i)
             {
                 struct usbdevfs_urb * urb;
-                libusby_transfer * tran;
-                usbyi_transfer * trani;
+                usbyb_transfer * tran;
 
                 if ((pollfds[i].revents & POLLOUT) == 0)
                     continue;
@@ -140,33 +155,32 @@ int libusby_run_event_loop_impl(libusby_context * ctx, libusby_transfer * tran)
                     continue;
 
                 tran = urb->usercontext;
-                trani = usbyi_tran_to_trani(tran);
 
-                tran->actual_length = trani->os_priv.req.actual_length;
-                if (tran->type == LIBUSBY_TRANSFER_TYPE_CONTROL)
-                    tran->actual_length += 8;
+                tran->pub.actual_length = tran->req.actual_length;
+                if (tran->pub.type == LIBUSBY_TRANSFER_TYPE_CONTROL)
+                    tran->pub.actual_length += 8;
 
-                if (trani->os_priv.req.status != 0)
-                    tran->status = LIBUSBY_ERROR_IO;
+                if (tran->req.status != 0)
+                    tran->pub.status = LIBUSBY_ERROR_IO;
 
-                pthread_mutex_lock(&ctxpriv->ctx_mutex);
-                trani->os_priv.active = 2;
+                pthread_mutex_lock(&ctx->ctx_mutex);
+                tran->active = 2;
 
-                if (tran->callback)
+                if (tran->pub.callback)
                 {
-                    pthread_mutex_unlock(&ctxpriv->ctx_mutex);
-                    tran->callback(tran);
-                    pthread_mutex_lock(&ctxpriv->ctx_mutex);
+                    pthread_mutex_unlock(&ctx->ctx_mutex);
+                    tran->pub.callback(&tran->pub);
+                    pthread_mutex_lock(&ctx->ctx_mutex);
                 }
 
-                if (trani->os_priv.active == 2)
+                if (tran->active == 2)
                 {
-                    trani->os_priv.active = 0;
-                    pthread_cond_broadcast(&trani->os_priv.cond);
+                    tran->active = 0;
+                    pthread_cond_broadcast(&tran->cond);
                 }
 
-                usbfs_unwatch_fd(ctxpriv, i);
-                pthread_mutex_unlock(&ctxpriv->ctx_mutex);
+                usbfs_unwatch_fd(ctx, i);
+                pthread_mutex_unlock(&ctx->ctx_mutex);
             }
 
             if (pollfds[fdcount].revents & POLLIN)
@@ -177,107 +191,101 @@ int libusby_run_event_loop_impl(libusby_context * ctx, libusby_transfer * tran)
             }
         }
 
-        pthread_mutex_lock(&ctxpriv->ctx_mutex);
+        pthread_mutex_lock(&ctx->ctx_mutex);
     }
 
     free(pollfds);
-    ctxpriv->loop_locked = 0;
+    ctx->loop_locked = 0;
     return r;
 }
 
-int libusby_run_event_loop(libusby_context * ctx)
+int usbyb_run_event_loop(usbyb_context * ctx)
 {
-    usbfs_ctx_private * ctxpriv = usbyi_ctx_to_priv(ctx);
     int r;
-
-    pthread_mutex_lock(&ctxpriv->ctx_mutex);
-    r = libusby_run_event_loop_impl(ctx, 0);
-    pthread_mutex_unlock(&ctxpriv->ctx_mutex);
+    pthread_mutex_lock(&ctx->ctx_mutex);
+    r = usbfs_run_event_loop_impl(ctx, 0);
+    pthread_mutex_unlock(&ctx->ctx_mutex);
     return r;
 }
 
-int libusby_wait_for_transfer(libusby_transfer * tran)
+int usbyb_wait_for_transfer(usbyb_transfer * tran)
 {
-    usbyi_transfer * trani = usbyi_tran_to_trani(tran);
-    usbfs_ctx_private * ctxpriv = usbyi_ctx_to_priv(trani->ctx);
+    usbyb_context * ctx = tran->intrn.ctx;
     int r = LIBUSBY_SUCCESS;
 
-    pthread_mutex_lock(&ctxpriv->ctx_mutex);
-    if (!ctxpriv->loop_locked)
-        r = libusby_run_event_loop_impl(trani->ctx, tran);
+    pthread_mutex_lock(&ctx->ctx_mutex);
+    if (!ctx->loop_locked)
+        r = usbfs_run_event_loop_impl(ctx, tran);
 
-    while (trani->os_priv.active)
-        pthread_cond_wait(&trani->os_priv.cond, &ctxpriv->ctx_mutex);
+    while (tran->active)
+        pthread_cond_wait(&tran->cond, &ctx->ctx_mutex);
 
-    pthread_mutex_unlock(&ctxpriv->ctx_mutex);
+    pthread_mutex_unlock(&ctx->ctx_mutex);
     return r;
 }
 
-void libusby_stop_event_loop(libusby_context * ctx)
+void usbyb_stop_event_loop(usbyb_context * ctx)
 {
-    usbfs_ctx_private * ctxpriv = usbyi_ctx_to_priv(ctx);
-    pthread_mutex_lock(&ctxpriv->ctx_mutex);
-    ctxpriv->loop_enabled = 0;
-    if (ctxpriv->loop_locked)
+    pthread_mutex_lock(&ctx->ctx_mutex);
+    ctx->loop_enabled = 0;
+    if (ctx->loop_locked)
     {
         char dummy = 's';
-        write(ctxpriv->pipe[1], &dummy, 1);
+        write(ctx->pipe[1], &dummy, 1);
     }
-    pthread_cond_broadcast(&ctxpriv->ctx_cond);
-    pthread_mutex_unlock(&ctxpriv->ctx_mutex);
+    pthread_cond_broadcast(&ctx->ctx_cond);
+    pthread_mutex_unlock(&ctx->ctx_mutex);
 }
 
-void libusby_reset_event_loop(libusby_context * ctx)
+void usbyb_reset_event_loop(usbyb_context * ctx)
 {
-    usbfs_ctx_private * ctxpriv = usbyi_ctx_to_priv(ctx);
-    pthread_mutex_lock(&ctxpriv->ctx_mutex);
-    ctxpriv->loop_enabled = 1;
-    pthread_mutex_unlock(&ctxpriv->ctx_mutex);
+    pthread_mutex_lock(&ctx->ctx_mutex);
+    ctx->loop_enabled = 1;
+    pthread_mutex_unlock(&ctx->ctx_mutex);
 }
 
-static int usbfs_init(libusby_context * ctx)
+int usbyb_init(usbyb_context * ctx)
 {
-    usbfs_ctx_private * ctxpriv = usbyi_ctx_to_priv(ctx);
-    if (pthread_mutex_init(&ctxpriv->ctx_mutex, NULL) < 0)
+    if (pthread_mutex_init(&ctx->ctx_mutex, NULL) < 0)
         return LIBUSBY_ERROR_NO_MEM;
 
-    if (pthread_cond_init(&ctxpriv->ctx_cond, NULL) < 0)
+    if (pthread_cond_init(&ctx->ctx_cond, NULL) < 0)
     {
-        pthread_mutex_destroy(&ctxpriv->ctx_mutex);
+        pthread_mutex_destroy(&ctx->ctx_mutex);
         return LIBUSBY_ERROR_NO_MEM;
     }
 
-    if (pipe(ctxpriv->pipe) < 0)
+    if (pipe(ctx->pipe) < 0)
     {
-        pthread_cond_destroy(&ctxpriv->ctx_cond);
-        pthread_mutex_destroy(&ctxpriv->ctx_mutex);
+        pthread_cond_destroy(&ctx->ctx_cond);
+        pthread_mutex_destroy(&ctx->ctx_mutex);
         return LIBUSBY_ERROR_NO_MEM;
     }
 
-    ctxpriv->loop_enabled = 1;
-    ctxpriv->loop_locked = 0;
+    ctx->loop_enabled = 1;
+    ctx->loop_locked = 0;
     return LIBUSBY_SUCCESS;
 }
 
-static void usbfs_exit(libusby_context * ctx)
+void usbyb_exit(usbyb_context * ctx)
 {
-    usbfs_ctx_private * ctxpriv = usbyi_ctx_to_priv(ctx);
-    free(ctxpriv->watched_fds);
-    close(ctxpriv->pipe[0]);
-    close(ctxpriv->pipe[1]);
-    pthread_cond_destroy(&ctxpriv->ctx_cond);
-    pthread_mutex_destroy(&ctxpriv->ctx_mutex);
+    free(ctx->watched_fds);
+    close(ctx->pipe[0]);
+    close(ctx->pipe[1]);
+    pthread_cond_destroy(&ctx->ctx_cond);
+    pthread_mutex_destroy(&ctx->ctx_mutex);
 }
 
-static int usbfs_get_device_list(libusby_context * ctx, libusby_device *** list)
+int usbyb_get_device_list(usbyb_context * ctx, libusby_device *** list)
 {
-    usbyi_device_list devlist = {0};
+    usbyi_device_list devlist;
     DIR * dir = 0;
     DIR * busdir = 0;
     struct dirent * ent;
     int fd = -1;
     int r;
 
+    memset(&devlist, 0, sizeof devlist);
     dir = opendir("/dev/bus/usb");
     if (!dir)
     {
@@ -285,7 +293,7 @@ static int usbfs_get_device_list(libusby_context * ctx, libusby_device *** list)
         return LIBUSBY_SUCCESS;
     }
 
-    while (ent = readdir(dir))
+    while ((ent = readdir(dir)))
     {
         char fname[2*NAME_MAX+32];
         struct dirent * busent;
@@ -302,7 +310,7 @@ static int usbfs_get_device_list(libusby_context * ctx, libusby_device *** list)
         if (!busdir)
             continue;
 
-        while (busent = readdir(busdir))
+        while ((busent = readdir(busdir)))
         {
             int i;
             int devno = strtol(busent->d_name, &end, 10);
@@ -319,45 +327,43 @@ static int usbfs_get_device_list(libusby_context * ctx, libusby_device *** list)
             if (fd == -1)
                 continue;
 
-            for (i = 0; i < ctx->devices.count; ++i)
+            for (i = 0; i < ctx->pub.devices.count; ++i)
             {
-                usbfs_device_private * devpriv = usbyi_dev_to_devpriv(ctx->devices.list[i]);
-                if (devpriv->busno == busno && devpriv->devno == devno)
+                usbyb_device * dev = (usbyb_device *)ctx->pub.devices.list[i];
+                if (dev->busno == busno && dev->devno == devno)
                 {
-                    r = usbyi_append_device_list(&devlist, ctx->devices.list[i]);
+                    r = usbyi_append_device_list(&devlist, ctx->pub.devices.list[i]);
                     if (r < 0)
                         goto error;
-                    libusby_ref_device(ctx->devices.list[i]);
+                    libusby_ref_device(ctx->pub.devices.list[i]);
                     break;
                 }
             }
 
-            if (i == ctx->devices.count)
+            if (i == ctx->pub.devices.count)
             {
-                libusby_device * dev = usbyi_alloc_device(ctx);
-                usbfs_device_private * devpriv;
+                usbyb_device * dev = usbyi_alloc_device(&ctx->pub);
                 if (!dev)
                 {
                     r = LIBUSBY_ERROR_NO_MEM;
                     goto error;
                 }
 
-                r = usbyi_append_device_list(&devlist, dev);
+                r = usbyi_append_device_list(&devlist, &dev->pub);
                 if (r < 0)
                 {
-                    libusby_unref_device(dev);
+                    libusby_unref_device(&dev->pub);
                     continue;
                 }
 
-                devpriv = usbyi_dev_to_devpriv(dev);
-                devpriv->busno = busno;
-                devpriv->devno = devno;
-                devpriv->fd = fd;
+                dev->busno = busno;
+                dev->devno = devno;
+                dev->fd = fd;
 
                 {
-                    char rawdesc[0x12]; // XXX
+                    uint8_t rawdesc[0x12]; // XXX
                     if (read(fd, rawdesc, sizeof rawdesc) == sizeof rawdesc)
-                        usbyi_sanitize_device_desc(&dev->device_desc, rawdesc);
+                        usbyi_sanitize_device_desc(&dev->pub.device_desc, rawdesc);
                 }
             }
         }
@@ -393,157 +399,165 @@ static int usbfs_error()
     }
 }
 
-static int usbfs_submit_transfer(libusby_transfer * tran)
+int usbyb_submit_transfer(usbyb_transfer * tran)
 {
-    usbfs_devhandle_private * handlepriv = usbyi_handle_to_handlepriv(tran->dev_handle);
-    usbyi_transfer * trani = usbyi_tran_to_trani(tran);
-    usbyi_os_transfer * ostran = &trani->os_priv;
-    usbfs_ctx_private * ctxpriv = usbyi_ctx_to_priv(tran->dev_handle->dev->ctx);
+    usbyb_device_handle * handle = (usbyb_device_handle *)tran->pub.dev_handle;
+    usbyb_context * ctx = (usbyb_context *)handle->pub.dev->pub.ctx;
     int i;
     int r = LIBUSBY_SUCCESS;
 
-    memset(&ostran->req, 0, sizeof ostran->req);
+    assert(ctx == tran->intrn.ctx);
 
-    switch (tran->type)
+    memset(&tran->req, 0, sizeof tran->req);
+
+    switch (tran->pub.type)
     {
     case LIBUSBY_TRANSFER_TYPE_CONTROL:
-        ostran->req.type = USBDEVFS_URB_TYPE_CONTROL;
+        tran->req.type = USBDEVFS_URB_TYPE_CONTROL;
         break;
     case LIBUSBY_TRANSFER_TYPE_BULK:
-        ostran->req.type = USBDEVFS_URB_TYPE_BULK;
+        tran->req.type = USBDEVFS_URB_TYPE_BULK;
         break;
     case LIBUSBY_TRANSFER_TYPE_INTERRUPT:
-        ostran->req.type = USBDEVFS_URB_TYPE_INTERRUPT;
+        tran->req.type = USBDEVFS_URB_TYPE_INTERRUPT;
         break;
     default:
         return LIBUSBY_ERROR_NOT_SUPPORTED;
     }
 
-    ostran->req.endpoint = tran->endpoint;
-    ostran->req.buffer = tran->buffer;
-    ostran->req.buffer_length = tran->length;
-    ostran->req.usercontext = tran;
+    tran->req.endpoint = tran->pub.endpoint;
+    tran->req.buffer = tran->pub.buffer;
+    tran->req.buffer_length = tran->pub.length;
+    tran->req.usercontext = tran;
 
-    pthread_mutex_lock(&ctxpriv->ctx_mutex);
+    pthread_mutex_lock(&ctx->ctx_mutex);
 
-    for (i = 0; i != ctxpriv->watched_fd_count; ++i)
+    for (i = 0; i != ctx->watched_fd_count; ++i)
     {
-        if (ctxpriv->watched_fds[i].fd == handlepriv->wrfd)
+        if (ctx->watched_fds[i].fd == handle->wrfd)
             break;
     }
 
-    if (ctxpriv->watched_fd_count == i)
+    if (ctx->watched_fd_count == i)
     {
-        if (ctxpriv->watched_fd_count == ctxpriv->watched_fd_capacity)
+        if (ctx->watched_fd_count == ctx->watched_fd_capacity)
         {
-            int newcap = ctxpriv->watched_fd_capacity == 0? 4: ctxpriv->watched_fd_capacity * 3 / 2;
-            struct watched_fd * newfds = realloc(ctxpriv->watched_fds, sizeof(struct watched_fd) * newcap);
+            int newcap = ctx->watched_fd_capacity == 0? 4: ctx->watched_fd_capacity * 3 / 2;
+            struct watched_fd * newfds = realloc(ctx->watched_fds, sizeof(struct watched_fd) * newcap);
             if (!newfds)
                 r = LIBUSBY_ERROR_NO_MEM;
-            ctxpriv->watched_fds = newfds;
-            ctxpriv->watched_fd_capacity = newcap;
+            ctx->watched_fds = newfds;
+            ctx->watched_fd_capacity = newcap;
         }
 
-        ++ctxpriv->watched_fd_count;
-        ctxpriv->watched_fds[i].fd = handlepriv->wrfd;
-        ctxpriv->watched_fds[i].refcount = 0;
+        ++ctx->watched_fd_count;
+        ctx->watched_fds[i].fd = handle->wrfd;
+        ctx->watched_fds[i].refcount = 0;
     }
 
-    if (r >= 0 && ioctl(handlepriv->wrfd, USBDEVFS_SUBMITURB, &ostran->req) < 0)
+    if (r >= 0 && ioctl(handle->wrfd, USBDEVFS_SUBMITURB, &tran->req) < 0)
     {
-        usbfs_unwatch_fd(ctxpriv, i);
+        usbfs_unwatch_fd(ctx, i);
         r = usbfs_error();
     }
 
-    if (r >= 0 && ctxpriv->loop_locked)
+    if (r >= 0 && ctx->loop_locked)
     {
         int dummy = 'u';
-        write(ctxpriv->pipe[1], &dummy, 1);
-        trani->os_priv.active = 1;
+        write(ctx->pipe[1], &dummy, 1);
+        tran->active = 1;
     }
 
-    pthread_mutex_unlock(&ctxpriv->ctx_mutex);
+    pthread_mutex_unlock(&ctx->ctx_mutex);
     return r;
 }
 
-static int usbfs_cancel_transfer(libusby_transfer * tran)
+int usbyb_cancel_transfer(usbyb_transfer * tran)
 {
-    usbfs_devhandle_private * handlepriv = usbyi_handle_to_handlepriv(tran->dev_handle);
-    usbyi_transfer * trani = usbyi_tran_to_trani(tran);
-    usbyi_os_transfer * ostran = &trani->os_priv;
+    usbyb_device_handle * handle = (usbyb_device_handle *)tran->pub.dev_handle;
 
-    if (ioctl(handlepriv->wrfd, USBDEVFS_DISCARDURB, &ostran->req) < 0)
+    if (ioctl(handle->wrfd, USBDEVFS_DISCARDURB, &tran->req) < 0)
         return usbfs_error();
 
     return LIBUSBY_SUCCESS;
 }
 
-static int usbfs_open(libusby_device_handle *dev_handle)
+int usbyb_open(usbyb_device_handle * handle)
 {
-    usbfs_device_private * devpriv = usbyi_dev_to_devpriv(dev_handle->dev);
-    usbfs_devhandle_private * handlepriv = usbyi_handle_to_handlepriv(dev_handle);
+    usbyb_device * dev = handle->pub.dev;
     char fdpath[32];
     int wrfd;
 
-    sprintf(fdpath, "/proc/self/fd/%d", devpriv->fd);
+    sprintf(fdpath, "/proc/self/fd/%d", dev->fd);
     wrfd = open(fdpath, O_RDWR);
     if (wrfd == -1)
         return LIBUSBY_ERROR_ACCESS;
 
-    handlepriv->wrfd = wrfd;
-    handlepriv->active_config_value = -1;
+    handle->wrfd = wrfd;
+    handle->active_config_value = -1;
     return LIBUSBY_SUCCESS;
 }
 
-static void usbfs_close(libusby_device_handle *dev_handle)
+void usbyb_close(usbyb_device_handle * handle)
 {
-    usbfs_devhandle_private * handlepriv = usbyi_handle_to_handlepriv(dev_handle);
-    close(handlepriv->wrfd);
+    close(handle->wrfd);
+    handle->wrfd = -1;
 }
 
-static int usbfs_get_descriptor(libusby_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
+int usbyb_get_descriptor(usbyb_device_handle * handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
 {
+    (void)handle;
+    (void)desc_type;
+    (void)desc_index;
+    (void)data;
+    (void)length;
     return LIBUSBY_ERROR_NOT_SUPPORTED;
 }
 
-static int usbfs_get_descriptor_cached(libusby_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
+int usbyb_get_descriptor_cached(usbyb_device * dev, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
 {
+    (void)dev;
+    (void)desc_type;
+    (void)desc_index;
+    (void)data;
+    (void)length;
     return LIBUSBY_ERROR_NOT_SUPPORTED;
 }
 
-static int usbfs_perform_transfer(libusby_transfer * tran)
+int usbyb_perform_transfer(usbyb_transfer * tran)
 {
-    int r;
-    usbfs_devhandle_private * handlepriv = usbyi_handle_to_handlepriv(tran->dev_handle);
-    if (tran->type == LIBUSBY_TRANSFER_TYPE_CONTROL)
+    usbyb_device_handle * handle = (usbyb_device_handle *)tran->pub.dev_handle;
+
+    if (tran->pub.type == LIBUSBY_TRANSFER_TYPE_CONTROL)
     {
+        int r;
         struct usbdevfs_ctrltransfer req;
-        req.bRequestType = tran->buffer[0];
-        req.bRequest = tran->buffer[1];
-        req.wValue = tran->buffer[2] | (tran->buffer[3] << 8);
-        req.wIndex = tran->buffer[4] | (tran->buffer[5] << 8);
-        req.wLength = tran->buffer[6] | (tran->buffer[7] << 8);
+        req.bRequestType = tran->pub.buffer[0];
+        req.bRequest = tran->pub.buffer[1];
+        req.wValue = tran->pub.buffer[2] | (tran->pub.buffer[3] << 8);
+        req.wIndex = tran->pub.buffer[4] | (tran->pub.buffer[5] << 8);
+        req.wLength = tran->pub.buffer[6] | (tran->pub.buffer[7] << 8);
         req.timeout = 0;
-        req.data = tran->buffer + 8;
+        req.data = tran->pub.buffer + 8;
 
-        r = ioctl(handlepriv->wrfd, USBDEVFS_CONTROL, &req);
+        r = ioctl(handle->wrfd, USBDEVFS_CONTROL, &req);
         if (r >= 0)
         {
-            tran->actual_length = r + 8;
-            tran->status = LIBUSBY_TRANSFER_COMPLETED;
+            tran->pub.actual_length = r + 8;
+            tran->pub.status = LIBUSBY_TRANSFER_COMPLETED;
         }
         else
         {
             switch (errno)
             {
             case ENODEV:
-                tran->status = LIBUSBY_TRANSFER_NO_DEVICE;
+                tran->pub.status = LIBUSBY_TRANSFER_NO_DEVICE;
                 break;
             case EPIPE:
-                tran->status = LIBUSBY_TRANSFER_STALL;
+                tran->pub.status = LIBUSBY_TRANSFER_STALL;
                 break;
             default:
-                tran->status = LIBUSBY_TRANSFER_ERROR;
+                tran->pub.status = LIBUSBY_TRANSFER_ERROR;
             }
         }
 
@@ -553,70 +567,34 @@ static int usbfs_perform_transfer(libusby_transfer * tran)
     return LIBUSBY_ERROR_NOT_SUPPORTED;
 }
 
-static int usbfs_claim_interface(libusby_device_handle * dev_handle, int interface_number)
+int usbyb_claim_interface(usbyb_device_handle * handle, int interface_number)
 {
-    usbfs_devhandle_private * handlepriv = usbyi_handle_to_handlepriv(dev_handle);
-    if (ioctl(handlepriv->wrfd, USBDEVFS_CLAIMINTERFACE, &interface_number) < 0)
+    if (ioctl(handle->wrfd, USBDEVFS_CLAIMINTERFACE, &interface_number) < 0)
         return usbfs_error();
     return LIBUSBY_SUCCESS;
 }
 
-static int usbfs_release_interface(libusby_device_handle * dev_handle, int interface_number)
+int usbyb_release_interface(usbyb_device_handle * handle, int interface_number)
 {
-    usbfs_devhandle_private * handlepriv = usbyi_handle_to_handlepriv(dev_handle);
-    if (ioctl(handlepriv->wrfd, USBDEVFS_RELEASEINTERFACE, &interface_number) < 0)
+    if (ioctl(handle->wrfd, USBDEVFS_RELEASEINTERFACE, &interface_number) < 0)
         return usbfs_error();
     return LIBUSBY_SUCCESS;
 }
 
-int usbfs_get_configuration(libusby_device_handle * dev_handle, int * config_value, int cached_only)
+int usbyb_get_configuration(usbyb_device_handle * handle, int * config_value, int cached_only)
 {
-    usbfs_devhandle_private * handlepriv = usbyi_handle_to_handlepriv(dev_handle);
-    if (handlepriv->active_config_value < 0)
+    (void)cached_only;
+    if (handle->active_config_value < 0)
         return LIBUSBY_ERROR_NOT_SUPPORTED;
-    *config_value = handlepriv->active_config_value;
+    *config_value = handle->active_config_value;
     return LIBUSBY_SUCCESS;
 }
 
-int usbfs_set_configuration(libusby_device_handle * dev_handle, int config_value)
+int usbyb_set_configuration(usbyb_device_handle * handle, int config_value)
 {
-    usbfs_devhandle_private * handlepriv = usbyi_handle_to_handlepriv(dev_handle);
-
-    if (ioctl(handlepriv->wrfd, USBDEVFS_SETCONFIGURATION, &config_value) < 0)
+    if (ioctl(handle->wrfd, USBDEVFS_SETCONFIGURATION, &config_value) < 0)
         return usbfs_error();
 
-    handlepriv->active_config_value = config_value;
+    handle->active_config_value = config_value;
     return LIBUSBY_SUCCESS;
-}
-
-static usbyi_backend const linux_usbfs_backend = {
-    sizeof(usbfs_ctx_private),
-    sizeof(usbfs_device_private),
-    sizeof(usbfs_devhandle_private),
-
-    &usbfs_init,
-    &usbfs_exit,
-
-    &usbfs_get_device_list,
-
-    &usbfs_open,
-    &usbfs_close,
-
-    &usbfs_get_descriptor,
-    &usbfs_get_descriptor_cached,
-    &usbfs_get_configuration,
-    &usbfs_set_configuration,
-
-    &usbfs_claim_interface,
-    &usbfs_release_interface,
-
-    &usbfs_perform_transfer,
-    &usbfs_submit_transfer,
-    &usbfs_cancel_transfer,
-    0, //&usbfs_reap_transfer,
-};
-
-int libusby_init(libusby_context **ctx)
-{
-    return usbyi_init(ctx, &linux_usbfs_backend);
 }
