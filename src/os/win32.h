@@ -8,11 +8,4 @@
 #undef interface
 #endif
 
-struct usbyi_os_transfer
-{
-	HANDLE hCompletionEvent;
-	OVERLAPPED overlapped;
-	int submitted;
-};
-
 #endif

@@ -10,6 +10,7 @@ extern int const usbyb_context_size;
 extern int const usbyb_device_size;
 extern int const usbyb_device_handle_size;
 extern int const usbyb_transfer_size;
+extern int const usbyb_transfer_pub_offset;
 
 int usbyb_init(usbyb_context * ctx);
 void usbyb_exit(usbyb_context * ctx);
@@ -28,16 +29,16 @@ int usbyb_set_configuration(usbyb_device_handle * dev_handle, int config_value);
 int usbyb_claim_interface(usbyb_device_handle * dev_handle, int interface_number); // opt
 int usbyb_release_interface(usbyb_device_handle * dev_handle, int interface_number); // opt
 
-int usbyb_perform_transfer(libusby_transfer * tran); // opt
-int usbyb_submit_transfer(libusby_transfer * tran);
-int usbyb_cancel_transfer(libusby_transfer * tran);
+int usbyb_perform_transfer(usbyb_transfer * tran); // opt
+int usbyb_submit_transfer(usbyb_transfer * tran);
+int usbyb_cancel_transfer(usbyb_transfer * tran);
 
-int usbyb_wait_for_transfer(libusby_transfer * transfer);
+int usbyb_wait_for_transfer(usbyb_transfer * transfer);
 int usbyb_run_event_loop(usbyb_context * ctx);
 void usbyb_stop_event_loop(usbyb_context * ctx);
 void usbyb_reset_event_loop(usbyb_context * ctx);
 
-int usbyb_init_transfer(usbyi_transfer * trani);
-void usbyb_clear_transfer(usbyi_transfer * trani);
+int usbyb_init_transfer(usbyb_transfer * trani);
+void usbyb_clear_transfer(usbyb_transfer * trani);
 
 #endif

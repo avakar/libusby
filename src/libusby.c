@@ -45,16 +45,6 @@ usbyb_device * usbyi_alloc_device(libusby_context * ctx)
 	return (usbyb_device *)res;
 }
 
-struct usbyi_transfer * usbyi_tran_to_trani(libusby_transfer * tran)
-{
-	return (struct usbyi_transfer *)tran - 1;
-}
-
-libusby_transfer * usbyi_trani_to_tran(struct usbyi_transfer * trani)
-{
-	return (libusby_transfer *)(trani + 1);
-}
-
 int libusby_init(libusby_context ** ctx)
 {
 	int r;
@@ -83,26 +73,27 @@ void libusby_exit(libusby_context * ctx)
 
 libusby_transfer * libusby_alloc_transfer(libusby_context * ctx, int iso_packets)
 {
-	size_t alloc_size = sizeof(struct usbyi_transfer) + sizeof(libusby_transfer) + (sizeof(libusby_iso_packet_descriptor)*(iso_packets-1));
-	struct usbyi_transfer * res = malloc(alloc_size);
+	size_t alloc_size = usbyb_transfer_size + (sizeof(libusby_iso_packet_descriptor)*(iso_packets-1));
+	usbyb_transfer * res = malloc(alloc_size);
+	usbyi_transfer * resi = (usbyi_transfer *)res;
 	if (!res)
 		return NULL;
-
 	memset(res, 0, alloc_size);
+
 	if (usbyb_init_transfer(res) < 0)
 	{
 		free(res);
 		return NULL;
 	}
 
-	res->ctx = ctx;
-	res->num_iso_packets = iso_packets;
-	return usbyi_trani_to_tran(res);
+	resi->ctx = (usbyb_context *)ctx;
+	resi->num_iso_packets = iso_packets;
+	return usbyi_get_pub_tran(res);
 }
 
 void libusby_free_transfer(libusby_transfer * transfer)
 {
-	struct usbyi_transfer * trani = usbyi_tran_to_trani(transfer);
+	usbyb_transfer * trani = usbyi_get_tran(transfer);
 	usbyb_clear_transfer(trani);
 	free(trani);
 }
@@ -125,9 +116,10 @@ void libusby_fill_bulk_transfer(libusby_transfer * transfer, libusby_device_hand
 		memset(transfer->iso_packet_desc, 0, sizeof(libusby_iso_packet_descriptor)*transfer->num_iso_packets);
 }
 
-int libusby_perform_transfer(usbyb_transfer * tran)
+int libusby_perform_transfer(libusby_transfer * tran)
 {
-	int r = usbyb_perform_transfer(tran);
+	usbyb_transfer * tranb = usbyi_get_tran(tran);
+	int r = usbyb_perform_transfer(tranb);
 	if (r == LIBUSBY_ERROR_NOT_SUPPORTED)
 	{
 		r = libusby_submit_transfer(tran);
@@ -141,8 +133,8 @@ int libusby_bulk_transfer(libusby_device_handle * dev_handle, libusby_endpoint_t
 {
 	int r;
 
-    libusby_device * dev = libusby_get_device(dev_handle);
-    libusby_transfer * tran = libusby_alloc_transfer(dev->ctx, 0);
+	libusby_device * dev = libusby_get_device(dev_handle);
+	libusby_transfer * tran = libusby_alloc_transfer(dev->ctx, 0);
 	if (!tran)
 		return LIBUSBY_ERROR_NO_MEM;
 	libusby_fill_bulk_transfer(tran, dev_handle, endpoint, data, length, 0, 0, timeout);
@@ -157,12 +149,14 @@ int libusby_bulk_transfer(libusby_device_handle * dev_handle, libusby_endpoint_t
 
 int libusby_submit_transfer(libusby_transfer * transfer)
 {
-	return usbyb_submit_transfer(transfer);
+	usbyb_transfer * tranb = usbyi_get_tran(transfer);
+	return usbyb_submit_transfer(tranb);
 }
 
 int libusby_cancel_transfer(libusby_transfer * transfer)
 {
-	return usbyb_cancel_transfer(transfer);
+	usbyb_transfer * tranb = usbyi_get_tran(transfer);
+	return usbyb_cancel_transfer(tranb);
 }
 
 int libusby_claim_interface(libusby_device_handle * dev_handle, int interface_number)
@@ -662,4 +656,35 @@ int libusby_set_configuration(libusby_device_handle * dev_handle, int config_val
 int libusby_get_configuration_cached(libusby_device_handle * dev_handle, int * config_value)
 {
 	return usbyb_get_configuration((usbyb_device_handle *)dev_handle, config_value, /*cached_only=*/1);
+}
+
+int libusby_wait_for_transfer(libusby_transfer * transfer)
+{
+	usbyb_transfer * tranb = usbyi_get_tran(transfer);
+	return usbyb_wait_for_transfer(tranb);
+}
+
+int libusby_run_event_loop(libusby_context * ctx)
+{
+	return usbyb_run_event_loop((usbyb_context *)ctx);
+}
+
+void libusby_stop_event_loop(libusby_context * ctx)
+{
+	usbyb_stop_event_loop((usbyb_context *)ctx);
+}
+
+void libusby_reset_event_loop(libusby_context * ctx)
+{
+	usbyb_reset_event_loop((usbyb_context *)ctx);
+}
+
+libusby_transfer * usbyi_get_pub_tran(usbyb_transfer * tran)
+{
+	return (libusby_transfer *)((char *)tran + usbyb_transfer_pub_offset);
+}
+
+usbyb_transfer * usbyi_get_tran(libusby_transfer * tran)
+{
+	return (usbyb_transfer *)((char *)tran - usbyb_transfer_pub_offset);
 }
