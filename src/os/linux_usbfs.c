@@ -23,9 +23,9 @@ struct watched_fd
     int refcount;
 };
 
-struct usbyb_context
+struct libusby_context
 {
-    libusby_context pub;
+    usbyi_device_list_node devlist_head;
 
     pthread_mutex_t ctx_mutex;
     pthread_cond_t ctx_cond;
@@ -42,6 +42,7 @@ struct usbyb_context
 struct usbyb_device
 {
     libusby_device pub;
+    usbyi_device_list_node devnode;
 
     int busno;
     int devno;
@@ -249,6 +250,8 @@ void usbyb_reset_event_loop(usbyb_context * ctx)
 
 int usbyb_init(usbyb_context * ctx)
 {
+    usbyi_init_devlist_head(&ctx->devlist_head);
+
     if (pthread_mutex_init(&ctx->ctx_mutex, NULL) < 0)
         return LIBUSBY_ERROR_NO_MEM;
 
@@ -272,6 +275,7 @@ int usbyb_init(usbyb_context * ctx)
 
 void usbyb_exit(usbyb_context * ctx)
 {
+    assert(ctx->devlist_head.next == &ctx->devlist_head);
     free(ctx->watched_fds);
     close(ctx->pipe[0]);
     close(ctx->pipe[1]);
@@ -315,8 +319,8 @@ int usbyb_get_device_list(usbyb_context * ctx, libusby_device *** list)
 
         while (r >= 0 && (busent = readdir(busdir)))
         {
-            int i;
             int devno = strtol(busent->d_name, &end, 10);
+            usbyi_device_list_node * devnode;
 
             if (*end != 0)
                 continue;
@@ -330,26 +334,27 @@ int usbyb_get_device_list(usbyb_context * ctx, libusby_device *** list)
             if (fd == -1)
                 continue;
 
-            for (i = 0; i < ctx->pub.devices.count; ++i)
+            pthread_mutex_lock(&ctx->ctx_mutex);
+            for (devnode = ctx->devlist_head.next; devnode != &ctx->devlist_head; devnode = devnode->next)
             {
-                usbyb_device * dev = (usbyb_device *)ctx->pub.devices.list[i];
+                usbyb_device * dev = container_of(devnode, usbyb_device, devnode);
                 if (dev->busno == busno && dev->devno == devno)
                 {
-                    r = usbyi_append_device_list(&devlist, ctx->pub.devices.list[i]);
+                    r = usbyi_append_device_list(&devlist, &dev->pub);
                     if (r < 0)
                         goto error;
-                    libusby_ref_device(ctx->pub.devices.list[i]);
+                    libusby_ref_device(&dev->pub);
                     break;
                 }
             }
 
-            if (i == ctx->pub.devices.count)
+            if (devnode == &ctx->devlist_head)
             {
                 usbyb_device * dev;
                 int i;
                 size_t cache_len = 0;
 
-                dev = usbyi_alloc_device(&ctx->pub);
+                dev = usbyi_alloc_device(ctx);
                 if (!dev)
                 {
                     r = LIBUSBY_ERROR_NO_MEM;
@@ -359,6 +364,7 @@ int usbyb_get_device_list(usbyb_context * ctx, libusby_device *** list)
                 dev->busno = busno;
                 dev->devno = devno;
                 dev->fd = fd;
+                usbyi_insert_before_devlist_node(&dev->devnode, &ctx->devlist_head);
 
                 /* Note that the device descriptor is read in host-endian. */
                 if (read(fd, &dev->pub.device_desc, sizeof dev->pub.device_desc) != sizeof dev->pub.device_desc)
@@ -401,6 +407,8 @@ error_unref_dev:
                     libusby_unref_device(&dev->pub);
                 }
             }
+
+            pthread_mutex_unlock(&ctx->ctx_mutex);
         }
 
         closedir(busdir);
@@ -412,18 +420,21 @@ error_unref_dev:
     return devlist.count;
 
 error:
+    pthread_mutex_unlock(&ctx->ctx_mutex);
     if (fd != -1)
         close(fd);
     closedir(busdir);
     closedir(dir);
     if (devlist.list)
-        libusby_free_device_list(devlist.list, 1);
+        libusby_free_device_list(devlist.list, /*unref_devices=*/1);
     return r;
 }
 
 void usbyb_finalize_device(usbyb_device * dev)
 {
+    usbyi_remove_devlist_node(&dev->devnode);
     free(dev->desc_cache);
+    close(dev->fd);
 }
 
 static int usbfs_error()
