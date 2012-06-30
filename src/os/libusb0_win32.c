@@ -1,4 +1,3 @@
-#include "libusb0_win32.h"
 #include "os.h"
 #include "../libusbyi.h"
 #include <windows.h>
@@ -143,22 +142,23 @@ void usbyb_exit(usbyb_context * ctx)
 	FreeLibrary(ctx->hKernel32);
 }
 
-static int usbyb_get_descriptor_with_handle(HANDLE hFile, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
+static int usbyb_get_descriptor_with_handle(HANDLE hFile, uint8_t desc_type, uint8_t desc_index, uint16_t langid, unsigned char * data, int length)
 {
 	libusb0_win32_request req = {0};
 	req.descriptor.type = desc_type;
 	req.descriptor.index = desc_index;
+	req.descriptor.language_id = langid;
 	return sync_device_io_control(hFile, LIBUSB_IOCTL_GET_DESCRIPTOR, &req, sizeof req, data, length);
 }
 
-int usbyb_get_descriptor_cached(usbyb_device * dev, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
+int usbyb_get_descriptor_cached(usbyb_device * dev, uint8_t desc_type, uint8_t desc_index, uint16_t langid, unsigned char * data, int length)
 {
-	return usbyb_get_descriptor_with_handle(dev->hFile, desc_type, desc_index, data, length);
+	return usbyb_get_descriptor_with_handle(dev->hFile, desc_type, desc_index, langid, data, length);
 }
 
-int usbyb_get_descriptor(usbyb_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
+int usbyb_get_descriptor(usbyb_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, uint16_t langid, unsigned char * data, int length)
 {
-	return usbyb_get_descriptor_cached((usbyb_device *)dev_handle->pub.dev, desc_type, desc_index, data, length);
+	return usbyb_get_descriptor_cached((usbyb_device *)dev_handle->pub.dev, desc_type, desc_index, langid, data, length);
 }
 
 int usbyb_get_configuration(usbyb_device_handle * dev_handle, int * config_value, int cached_only)
@@ -227,7 +227,7 @@ int usbyb_get_device_list(usbyb_context * ctx, libusby_device *** list)
 			dev->hFile = hFile;
 			usbyi_insert_before_devlist_node(&dev->devnode, &ctx->devlist_head);
 
-			if (usbyb_get_descriptor_with_handle(hFile, 1, 0, cached_desc, sizeof cached_desc) != sizeof cached_desc
+			if (usbyb_get_descriptor_with_handle(hFile, 1, 0, 0, cached_desc, sizeof cached_desc) != sizeof cached_desc
 				|| usbyi_sanitize_device_desc(&dev->pub.device_desc, cached_desc) < 0
 				|| usbyi_append_device_list(&devlist, &dev->pub) < 0)
 			{

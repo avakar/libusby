@@ -385,7 +385,7 @@ int libusby_control_transfer(libusby_device_handle * dev_handle, uint8_t bmReque
 
 int libusby_get_descriptor(libusby_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
 {
-	int r = usbyb_get_descriptor((usbyb_device_handle *)dev_handle, desc_type, desc_index, data, length);
+	int r = usbyb_get_descriptor((usbyb_device_handle *)dev_handle, desc_type, desc_index, 0, data, length);
 	if (r == LIBUSBY_ERROR_NOT_SUPPORTED)
 		r = libusby_control_transfer(dev_handle, 0x80, 6/*GET_DESCRIPTOR*/, desc_index | (desc_type << 8), 0, data, length, 0);
 	return r;
@@ -405,7 +405,10 @@ void libusby_fill_control_transfer(libusby_transfer * transfer, libusby_device_h
 
 int libusby_get_string_descriptor(libusby_device_handle * dev_handle, uint8_t desc_index, uint16_t langid, unsigned char * data, int length)
 {
-	return libusby_control_transfer(dev_handle, 0x80, 6/*GET_DESCRIPTOR*/, desc_index | 0x300, langid, data, length, 0);
+	int r = usbyb_get_descriptor((usbyb_device_handle *)dev_handle, 3, desc_index, langid, data, length);
+	if (r == LIBUSBY_ERROR_NOT_SUPPORTED)
+		r = libusby_control_transfer(dev_handle, 0x80, 6/*GET_DESCRIPTOR*/, desc_index | 0x300, langid, data, length, 0);
+	return r;
 }
 
 static int usbyi_sanitize_config_descriptor(libusby_config_descriptor ** config, unsigned char * rawdesc, uint16_t wTotalLength)
@@ -539,7 +542,7 @@ int libusby_get_config_descriptor_cached(libusby_device * dev, uint8_t config_in
 	uint16_t wTotalLength;
 	unsigned char * rawdesc;
 
-	r = usbyb_get_descriptor_cached((usbyb_device *)dev, 2, config_index, header, sizeof header);
+	r = usbyb_get_descriptor_cached((usbyb_device *)dev, 2, config_index, 0, header, sizeof header);
 	if (r < 0)
 		return r;
 
@@ -549,7 +552,7 @@ int libusby_get_config_descriptor_cached(libusby_device * dev, uint8_t config_in
 	if (!rawdesc)
 		return LIBUSBY_ERROR_NO_MEM;
 
-	r = usbyb_get_descriptor_cached((usbyb_device *)dev, 2, config_index, rawdesc, wTotalLength);
+	r = usbyb_get_descriptor_cached((usbyb_device *)dev, 2, config_index, 0, rawdesc, wTotalLength);
 	if (r >= 0)
 		r = usbyi_sanitize_config_descriptor(config, rawdesc, r);
 

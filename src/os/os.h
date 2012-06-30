@@ -23,8 +23,8 @@ void usbyb_finalize_device(usbyb_device * dev);
 int usbyb_open(usbyb_device_handle *dev_handle); // opt
 void usbyb_close(usbyb_device_handle *dev_handle); // opt
 
-int usbyb_get_descriptor(usbyb_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length); // opt
-int usbyb_get_descriptor_cached(usbyb_device * dev, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length); // opt
+int usbyb_get_descriptor(usbyb_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, uint16_t langid, unsigned char * data, int length); // opt
+int usbyb_get_descriptor_cached(usbyb_device * dev, uint8_t desc_type, uint8_t desc_index, uint16_t langid, unsigned char * data, int length); // opt
 
 int usbyb_get_configuration(usbyb_device_handle * dev_handle, int * config_value, int cached_only); // opt
 int usbyb_set_configuration(usbyb_device_handle * dev_handle, int config_value); // opt
