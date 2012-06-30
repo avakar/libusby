@@ -555,15 +555,17 @@ void usbyb_close(usbyb_device_handle * handle)
     handle->wrfd = -1;
 }
 
-int usbyb_get_descriptor(usbyb_device_handle * handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
+int usbyb_get_descriptor(usbyb_device_handle * handle, uint8_t desc_type, uint8_t desc_index, uint16_t langid, unsigned char * data, int length)
 {
-    return usbyb_get_descriptor_cached(handle->pub.dev, desc_type, desc_index, data, length);
+    return usbyb_get_descriptor_cached(handle->pub.dev, desc_type, desc_index, langid, data, length);
 }
 
-int usbyb_get_descriptor_cached(usbyb_device * dev, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length)
+int usbyb_get_descriptor_cached(usbyb_device * dev, uint8_t desc_type, uint8_t desc_index, uint16_t langid, unsigned char * data, int length)
 {
     int i;
     uint8_t * cache_ptr = dev->desc_cache;
+
+    (void)langid;
 
     if (desc_type != 2/*CONFIGURATION*/)
         return LIBUSBY_ERROR_NOT_SUPPORTED;
