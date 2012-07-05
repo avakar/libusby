@@ -1,6 +1,7 @@
 SOURCES += $$PWD/src/libusby.c
 HEADERS += $$PWD/src/libusb.h \
     $$PWD/src/libusby.h \
+    $$PWD/src/libusby.hpp \
     $$PWD/src/libusbyi.h \
     $$PWD/src/libusbyi_fwd.h \
     $$PWD/src/os/os.h
