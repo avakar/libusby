@@ -162,7 +162,7 @@ public:
 
 	int try_open(device const & dev)
 	{
-		this->try_open(dev.get());
+		return this->try_open(dev.get());
 	}
 
 	int try_open(libusby_device * dev)
