@@ -339,7 +339,7 @@ int libusby_control_transfer(libusby_device_handle * dev_handle, uint8_t bmReque
 	int r;
 
 	uint8_t * buffer = 0;
-    libusby_device * dev = libusby_get_device(dev_handle);
+	libusby_device * dev = libusby_get_device(dev_handle);
 	libusby_transfer * tran = libusby_alloc_transfer(dev->ctx, 0);
 	if (!tran)
 		return LIBUSBY_ERROR_NO_MEM;
@@ -408,6 +408,111 @@ int libusby_get_string_descriptor(libusby_device_handle * dev_handle, uint8_t de
 	int r = usbyb_get_descriptor((usbyb_device_handle *)dev_handle, 3, desc_index, langid, data, length);
 	if (r == LIBUSBY_ERROR_NOT_SUPPORTED)
 		r = libusby_control_transfer(dev_handle, 0x80, 6/*GET_DESCRIPTOR*/, desc_index | 0x300, langid, data, length, 0);
+	return r;
+}
+
+static int encode_utf8(char * data, int length, uint32_t cp)
+{
+	int res = 0;
+
+	assert(length > 0);
+	assert(cp < 0x110000);
+
+	if (cp < 0x7f)
+	{
+		data[res++] = cp;
+	}
+	else if (cp < 0x7ff)
+	{
+		data[res++] = 0xC0 | (cp >> 6);
+		if (res < length)
+			data[res++] = 0x80 | (cp & 0x3f);
+	}
+	else if (cp < 0xffff)
+	{
+		data[res++] = 0xe0 | (cp >> 12);
+		if (res < length)
+			data[res++] = 0x80 | ((cp >> 6) & 0x3f);
+		if (res < length)
+			data[res++] = 0x80 | (cp & 0x3f);
+	}
+	else
+	{
+		data[res++] = 0xf0 | (cp >> 18);
+		if (res < length)
+			data[res++] = 0x80 | ((cp >> 12) & 0x3f);
+		if (res < length)
+			data[res++] = 0x80 | ((cp >> 6) & 0x3f);
+		if (res < length)
+			data[res++] = 0x80 | (cp & 0x3f);
+	}
+
+	return res;
+}
+
+int libusby_get_string_descriptor_utf8(libusby_device_handle * dev_handle, uint8_t desc_index, uint16_t langid, char * data, int length)
+{
+	int r, i;
+	unsigned char utf16_buf[256];
+
+	r = libusby_get_string_descriptor(dev_handle, desc_index, langid, utf16_buf, sizeof utf16_buf);
+	if (r < 0)
+		return r;
+
+	if (r < 2 || utf16_buf[1] != 3)
+		return LIBUSBY_ERROR_IO;
+
+	if (r > utf16_buf[0])
+		r = utf16_buf[0];
+
+	if (r % 2 != 0)
+		return LIBUSBY_ERROR_IO;
+
+	// Translate UTF-16LE to UTF-8.
+	{
+		int data_len = 0;
+		int encoded_len = 0;
+		uint16_t high_surrogate = 0;
+		for (i = 2; encoded_len < length && i < r; i += 2)
+		{
+			uint16_t cu = utf16_buf[i] | (utf16_buf[i+1] << 8);
+			if (cu >= 0xDC00 && cu < 0xE000)
+			{
+				// low surrogate
+				if (!high_surrogate)
+					return LIBUSBY_ERROR_IO;
+
+				encoded_len = encode_utf8(data + data_len, length - data_len, ((uint32_t)(high_surrogate - 0xD800) << 10) | (cu - 0xDC00));
+				high_surrogate = 0;
+			}
+			else if (cu >= 0xD800 && cu < 0xDC00)
+			{
+				// high surrogate
+				if (high_surrogate)
+					return LIBUSBY_ERROR_IO;
+
+				high_surrogate = cu;
+			}
+			else
+			{
+				if (high_surrogate)
+					return LIBUSBY_ERROR_IO;
+
+				encoded_len = encode_utf8(data + data_len, length - data_len, cu);
+			}
+
+			if (encoded_len < 0)
+				return encoded_len;
+
+			data_len += encoded_len;
+		}
+
+		if (i == r && high_surrogate)
+			return LIBUSBY_ERROR_IO;
+
+		r = data_len;
+	}
+
 	return r;
 }
 

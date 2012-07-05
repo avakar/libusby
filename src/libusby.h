@@ -197,6 +197,7 @@ void libusby_free_config_descriptor(libusby_config_descriptor * config);
 int libusby_get_string_descriptor_ascii(libusby_device_handle * dev_handle, uint8_t desc_index, unsigned char * data, int length);
 int libusby_get_descriptor(libusby_device_handle * dev_handle, uint8_t desc_type, uint8_t desc_index, unsigned char * data, int length);
 int libusby_get_string_descriptor(libusby_device_handle * dev_handle, uint8_t desc_index, uint16_t langid, unsigned char * data, int length);
+int libusby_get_string_descriptor_utf8(libusby_device_handle * dev_handle, uint8_t desc_index, uint16_t langid, char * data, int length);
 
 /* Asynchronous device I/O */
 libusby_transfer * libusby_alloc_transfer(libusby_context * ctx, int iso_packets);
