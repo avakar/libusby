@@ -3,7 +3,7 @@
 
 #include "../libusby.h"
 
-typedef struct libusby_context usbyb_context;
+typedef struct usbyb_context usbyb_context;
 typedef struct usbyb_device usbyb_device;
 typedef struct usbyb_device_handle usbyb_device_handle;
 typedef struct usbyb_transfer usbyb_transfer;
@@ -37,9 +37,6 @@ int usbyb_submit_transfer(usbyb_transfer * tran);
 int usbyb_cancel_transfer(usbyb_transfer * tran);
 
 int usbyb_wait_for_transfer(usbyb_transfer * transfer);
-int usbyb_run_event_loop(usbyb_context * ctx);
-void usbyb_stop_event_loop(usbyb_context * ctx);
-void usbyb_reset_event_loop(usbyb_context * ctx);
 
 int usbyb_init_transfer(usbyb_transfer * tran);
 void usbyb_clear_transfer(usbyb_transfer * tran);

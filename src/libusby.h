@@ -2,6 +2,8 @@
 #define LIBUSBY_LIBUSBY_H
 
 #include <stdint.h>
+#include "error.h"
+#include "libpolly.h"
 
 /* A workaround (`<windows.h>` defines `interface`). */
 #ifdef interface
@@ -15,6 +17,7 @@ extern "C" {
 typedef struct libusby_context libusby_context;
 typedef struct libusby_device libusby_device;
 typedef struct libusby_device_handle libusby_device_handle;
+typedef libpolly_event_loop libusby_event_loop;
 
 typedef uint8_t libusby_endpoint_t;
 typedef unsigned int libusby_timeout_t;
@@ -29,24 +32,6 @@ typedef enum libusby_transfer_status
 	LIBUSBY_TRANSFER_NO_DEVICE,
 	LIBUSBY_TRANSFER_OVERFLOW,
 } libusby_transfer_status;
-
-typedef enum libusby_error
-{
-	LIBUSBY_SUCCESS = 0,
-	LIBUSBY_ERROR_IO = -1,
-	LIBUSBY_ERROR_INVALID_PARAM = -2,
-	LIBUSBY_ERROR_ACCESS = -3,
-	LIBUSBY_ERROR_NO_DEVICE = -4,
-	LIBUSBY_ERROR_NOT_FOUND = -5,
-	LIBUSBY_ERROR_BUSY = -6,
-	LIBUSBY_ERROR_TIMEOUT = -7,
-	LIBUSBY_ERROR_OVERFLOW = -8,
-	LIBUSBY_ERROR_PIPE = -9,
-	LIBUSBY_ERROR_INTERRUPTED = -10,
-	LIBUSBY_ERROR_NO_MEM = -11,
-	LIBUSBY_ERROR_NOT_SUPPORTED = -12,
-	LIBUSBY_ERROR_OTHER = -99,
-} libusby_error;
 
 typedef enum libusby_transfer_type
 {
@@ -160,6 +145,7 @@ typedef struct libusby_config_descriptor
 
 /* Library initialization/exit */
 int libusby_init(libusby_context ** ctx);
+int libusby_init_with_polly(libusby_context ** ctx, libpolly_context * polly);
 void libusby_exit(libusby_context * ctx);
 
 /* Device handling and enumeration */
@@ -220,9 +206,8 @@ int libusby_bulk_transfer(libusby_device_handle * dev_handle, libusby_endpoint_t
 int libusby_interrupt_transfer(libusby_device_handle * dev_handle, libusby_endpoint_t endpoint, uint8_t * data, int length, int * transferred, libusby_timeout_t timeout);
 
 /* Event loop */
-int libusby_run_event_loop(libusby_context * ctx);
-void libusby_stop_event_loop(libusby_context * ctx);
-void libusby_reset_event_loop(libusby_context * ctx);
+int libusby_start_event_loop(libusby_context * ctx, libusby_event_loop ** loop);
+void libusby_join_event_loop(libusby_event_loop * loop);
 
 #ifdef __cplusplus
 }

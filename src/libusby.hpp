@@ -233,19 +233,17 @@ public:
 		m_ctx = new_ctx;
 	}
 
+	void create_with_polly(libpolly_context * polly)
+	{
+		libusby_context * new_ctx = 0;
+		error::check(libusby_init_with_polly(&new_ctx, polly));
+		this->clear();
+		m_ctx = new_ctx;
+	}
+
 	libusby_context * get() const
 	{
 		return m_ctx;
-	}
-
-	void run_event_loop()
-	{
-		libusby_run_event_loop(m_ctx);
-	}
-
-	void stop_event_loop()
-	{
-		libusby_stop_event_loop(m_ctx);
 	}
 
 	device_list get_device_list()

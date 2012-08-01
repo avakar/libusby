@@ -1,5 +1,6 @@
 #include "os.h"
 #include "../libusbyi.h"
+#include "libpolly_win32.h"
 #include <windows.h>
 #include <stdio.h>
 #include <assert.h>
@@ -8,30 +9,15 @@
 
 typedef BOOL WINAPI cancel_io_ex_t(HANDLE hFile, LPOVERLAPPED lpOverlapped);
 
-typedef struct usbyi_handle_list
+struct usbyb_context
 {
-	int capacity;
-	HANDLE * handles;
-} usbyi_handle_list;
-
-struct libusby_context
-{
+	libusby_context pub;
 	usbyi_device_list_node devlist_head;
 
 	HMODULE hKernel32;
 	cancel_io_ex_t * cancel_io_ex;
 
 	CRITICAL_SECTION ctx_mutex;
-
-	usbyb_transfer * trani_first;
-	usbyb_transfer * trani_last;
-	int tran_count;
-
-	usbyi_handle_list handle_list;
-
-	HANDLE hReaperLock;
-	HANDLE hEventLoopStopped;
-	HANDLE hTransferListUpdated;
 };
 
 struct usbyb_device
@@ -52,7 +38,7 @@ struct usbyb_transfer
 	usbyi_transfer intrn;
 	HANDLE hCompletionEvent;
 	OVERLAPPED overlapped;
-	int submitted;
+	volatile int submitted;
 	libusby_transfer pub;
 };
 
@@ -106,39 +92,14 @@ int usbyb_init(usbyb_context * ctx)
 		return LIBUSBY_ERROR_INVALID_PARAM;
 	ctx->cancel_io_ex = (cancel_io_ex_t *)GetProcAddress(ctx->hKernel32, "CancelIoEx");
 
-	ctx->hReaperLock = CreateEvent(NULL, FALSE, TRUE, NULL);
-	if (!ctx->hReaperLock)
-		goto error;
-
-	ctx->hEventLoopStopped = CreateEvent(NULL, TRUE, FALSE, NULL);
-	if (!ctx->hEventLoopStopped)
-		goto error;
-
-	ctx->hTransferListUpdated = CreateEvent(NULL, TRUE, FALSE, NULL);
-	if (!ctx->hTransferListUpdated)
-		goto error;
-
 	InitializeCriticalSection(&ctx->ctx_mutex);
 	return LIBUSBY_SUCCESS;
-
-error:
-	if (ctx->hTransferListUpdated)
-		CloseHandle(ctx->hTransferListUpdated);
-	if (ctx->hEventLoopStopped)
-		CloseHandle(ctx->hEventLoopStopped);
-	if (ctx->hReaperLock)
-		CloseHandle(ctx->hReaperLock);
-	FreeLibrary(ctx->hKernel32);
-	return LIBUSBY_ERROR_NO_MEM;
 }
 
 void usbyb_exit(usbyb_context * ctx)
 {
 	assert(ctx->devlist_head.next == &ctx->devlist_head);
 	DeleteCriticalSection(&ctx->ctx_mutex);
-	CloseHandle(ctx->hTransferListUpdated);
-	CloseHandle(ctx->hEventLoopStopped);
-	CloseHandle(ctx->hReaperLock);
 	FreeLibrary(ctx->hKernel32);
 }
 
@@ -381,6 +342,28 @@ int usbyb_perform_transfer(usbyb_transfer * tran)
 	return LIBUSBY_SUCCESS;
 }
 
+static void usbyb_reap_transfer(HANDLE handle, void * user_data)
+{
+	usbyb_transfer * tran = user_data;
+	usbyb_device * dev = tran->pub.dev_handle->dev;
+	usbyb_context * ctx = tran->intrn.ctx;
+
+	DWORD dwTransferred;
+	BOOL res = GetOverlappedResult(dev->hFile, &tran->overlapped, &dwTransferred, TRUE);
+
+	(void)handle;
+
+	usbyb_update_finished_transfer(tran,  res? ERROR_SUCCESS: GetLastError(), dwTransferred);
+
+	tran->submitted = 0;
+
+	if (tran->pub.callback)
+		tran->pub.callback(&tran->pub);
+
+	if (!tran->submitted)
+		SetEvent(tran->hCompletionEvent);
+}
+
 int usbyb_submit_transfer(usbyb_transfer * tran)
 {
 	usbyb_device * dev = tran->pub.dev_handle->dev;
@@ -413,16 +396,8 @@ int usbyb_submit_transfer(usbyb_transfer * tran)
 
 	ResetEvent(tran->hCompletionEvent);
 
-	tran->intrn.next = 0;
-	tran->intrn.prev = ctx->trani_last;
-	if (ctx->trani_last)
-		ctx->trani_last->intrn.next = tran;
-	ctx->trani_last = tran;
-	if (!ctx->trani_first)
-		ctx->trani_first = tran;
-	++ctx->tran_count;
 	tran->submitted = 1;
-	SetEvent(ctx->hTransferListUpdated);
+	libpolly_win32_add_handle(ctx->pub.polly_ctx, tran->overlapped.hEvent, &usbyb_reap_transfer, tran);
 
 	LeaveCriticalSection(&ctx->ctx_mutex);
 	return LIBUSBY_SUCCESS;
@@ -432,7 +407,6 @@ int usbyb_cancel_transfer(usbyb_transfer * tran)
 {
 	usbyb_context * ctxpriv = tran->intrn.ctx;
 
-	EnterCriticalSection(&ctxpriv->ctx_mutex);
 	if (tran->submitted)
 	{
 		usbyb_device * dev;
@@ -451,46 +425,8 @@ int usbyb_cancel_transfer(usbyb_transfer * tran)
 			sync_device_io_control(dev->hFile, LIBUSB_IOCTL_ABORT_ENDPOINT, &req, sizeof req, 0, 0);
 		}
 	}
-	LeaveCriticalSection(&ctxpriv->ctx_mutex);
 
 	return LIBUSBY_SUCCESS;
-}
-
-void usbyb_reap_transfer(usbyb_transfer * tran)
-{
-	usbyb_device * dev = tran->pub.dev_handle->dev;
-	usbyb_context * ctx = tran->intrn.ctx;
-
-	DWORD dwTransferred;
-	BOOL res = GetOverlappedResult(dev->hFile, &tran->overlapped, &dwTransferred, TRUE);
-
-	usbyb_update_finished_transfer(tran,  res? ERROR_SUCCESS: GetLastError(), dwTransferred);
-
-	EnterCriticalSection(&ctx->ctx_mutex);
-	if (tran->intrn.next)
-		tran->intrn.next->intrn.prev = tran->intrn.prev;
-	else
-		ctx->trani_last = tran->intrn.prev;
-
-	if (tran->intrn.prev)
-		tran->intrn.prev->intrn.next = tran->intrn.next;
-	else
-		ctx->trani_first = tran->intrn.next;
-
-	tran->intrn.next = 0;
-	tran->intrn.prev = 0;
-	--ctx->tran_count;
-
-	tran->submitted = 0;
-	LeaveCriticalSection(&ctx->ctx_mutex);
-
-	if (tran->pub.callback)
-		tran->pub.callback(&tran->pub);
-
-	EnterCriticalSection(&ctx->ctx_mutex);
-	if (!tran->submitted)
-		SetEvent(tran->hCompletionEvent);
-	LeaveCriticalSection(&ctx->ctx_mutex);
 }
 
 int usbyb_open(usbyb_device_handle * dev_handle)
@@ -527,124 +463,7 @@ void usbyb_clear_transfer(usbyb_transfer * tran)
 	CloseHandle(tran->hCompletionEvent);
 }
 
-static void usbyi_free_handle_list(usbyi_handle_list * handle_list)
-{
-	free(handle_list->handles);
-	handle_list->handles = 0;
-	handle_list->capacity = 0;
-}
-
-static int usbyi_reserve_handle_list(usbyi_handle_list * handle_list, int new_capacity)
-{
-	if (new_capacity < 4)
-		new_capacity = 4;
-
-	if (handle_list->capacity / 4 > new_capacity || handle_list->capacity < new_capacity)
-	{
-		HANDLE * new_handles;
-
-		new_capacity = new_capacity * 3 / 2;
-		new_handles = realloc(handle_list->handles, new_capacity * sizeof(HANDLE));
-		if (!new_handles)
-			return LIBUSBY_ERROR_NO_MEM;
-
-		handle_list->capacity = new_capacity;
-		handle_list->handles = new_handles;
-	}
-
-	return LIBUSBY_SUCCESS;
-}
-
-static int usbyi_win32_reap_until_locked(usbyb_context * ctx, HANDLE hTarget)
-{
-	for (;;)
-	{
-		int handle_count = 2;
-		int i;
-		usbyb_transfer * trani_cur;
-		HANDLE h;
-		DWORD res;
-
-		EnterCriticalSection(&ctx->ctx_mutex);
-		res = usbyi_reserve_handle_list(&ctx->handle_list, 2 + ctx->tran_count);
-		if (res < 0)
-		{
-			LeaveCriticalSection(&ctx->ctx_mutex);
-			return res;
-		}
-
-		ctx->handle_list.handles[0] = hTarget;
-		ctx->handle_list.handles[1] = ctx->hTransferListUpdated;
-
-		trani_cur = ctx->trani_first;
-		for (i = 0; i < ctx->tran_count && trani_cur != NULL; ++i, trani_cur = trani_cur->intrn.next)
-		{
-			if (trani_cur->overlapped.hEvent != hTarget)
-				ctx->handle_list.handles[handle_count++] = trani_cur->overlapped.hEvent;
-		}
-
-		ResetEvent(ctx->hTransferListUpdated);
-		LeaveCriticalSection(&ctx->ctx_mutex);
-
-		res = WaitForMultipleObjects(handle_count, ctx->handle_list.handles, FALSE, INFINITE);
-		if (res < WAIT_OBJECT_0 && res >= WAIT_OBJECT_0 + handle_count)
-			return LIBUSBY_ERROR_IO;
-
-		if (res == WAIT_OBJECT_0)
-			return LIBUSBY_SUCCESS;
-
-		if (res == WAIT_OBJECT_0 + 1)
-			continue;
-
-		h = ctx->handle_list.handles[res - WAIT_OBJECT_0];
-		trani_cur = ctx->trani_first;
-		for (i = 0; i < ctx->tran_count && trani_cur != NULL; ++i, trani_cur = trani_cur->intrn.next)
-		{
-			if (trani_cur->overlapped.hEvent == h)
-			{
-				usbyb_reap_transfer(trani_cur);
-				break;
-			}
-		}
-	}
-}
-
-static int usbyi_win32_reap_until(usbyb_context * ctx, HANDLE hTarget)
-{
-	HANDLE handles[2] = { hTarget, ctx->hReaperLock };
-	int res = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
-
-	switch (res)
-	{
-	case WAIT_OBJECT_0:
-		return LIBUSBY_SUCCESS;
-	case WAIT_OBJECT_0 + 1:
-		break;
-	default:
-		return LIBUSBY_ERROR_IO;
-	}
-
-	res = usbyi_win32_reap_until_locked(ctx, hTarget);
-	SetEvent(ctx->hReaperLock);
-	return res;
-}
-
 int usbyb_wait_for_transfer(usbyb_transfer * tran)
 {
-	return usbyi_win32_reap_until(tran->intrn.ctx, tran->hCompletionEvent);
-}
-
-int usbyb_run_event_loop(usbyb_context * ctx)
-{
-	return usbyi_win32_reap_until(ctx, ctx->hEventLoopStopped);
-}
-
-void usbyb_stop_event_loop(usbyb_context * ctx)
-{
-	SetEvent(ctx->hEventLoopStopped);
-}
-
-void usbyb_reset_event_loop(usbyb_context * ctx)
-{
-	ResetEvent(ctx->hEventLoopStopped);
+	return libpolly_win32_wait_until(tran->intrn.ctx->pub.polly_ctx, tran->hCompletionEvent);
 }

@@ -8,8 +8,11 @@ HEADERS += $$PWD/src/libusb.h \
 INCLUDEPATH += $$PWD/src
 
 win32 {
-    SOURCES += $$PWD/src/os/libusb0_win32.c
-    HEADERS += $$PWD/src/os/libusb0_win32_intf.h
+    SOURCES += \
+        $$PWD/src/os/libusb0_win32.c
+
+    HEADERS += \
+        $$PWD/src/os/libusb0_win32_intf.h
 }
 
 linux-* {

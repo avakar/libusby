@@ -50,7 +50,7 @@ int usbyi_append_device_list(struct usbyi_device_list * devices, libusby_device 
 	return LIBUSBY_SUCCESS;
 }
 
-usbyb_device * usbyi_alloc_device(libusby_context * ctx)
+usbyb_device * usbyi_alloc_device(usbyb_context * ctx)
 {
 	libusby_device * res = malloc(usbyb_device_size);
 	memset(res, 0, usbyb_device_size);
@@ -60,7 +60,7 @@ usbyb_device * usbyi_alloc_device(libusby_context * ctx)
 	return (usbyb_device *)res;
 }
 
-int libusby_init(libusby_context ** ctx)
+int libusby_init_with_polly(libusby_context ** ctx, libpolly_context * polly)
 {
 	int r;
 	libusby_context * res = malloc(usbyb_context_size);
@@ -68,9 +68,13 @@ int libusby_init(libusby_context ** ctx)
 		return LIBUSBY_ERROR_NO_MEM;
 	memset(res, 0, usbyb_context_size);
 
+	res->polly_ctx = polly;
+	libpolly_ref_context(polly);
+
 	r = usbyb_init((usbyb_context *)res);
 	if (r < 0)
 	{
+		libpolly_unref_context(polly);
 		free(res);
 		return r;
 	}
@@ -79,8 +83,21 @@ int libusby_init(libusby_context ** ctx)
 	return LIBUSBY_SUCCESS;
 }
 
+int libusby_init(libusby_context ** ctx)
+{
+	libpolly_context * polly;
+	int r = libpolly_init(&polly);
+	if (r < 0)
+		return r;
+
+	r = libusby_init_with_polly(ctx, polly);
+	libpolly_unref_context(polly);
+	return r;
+}
+
 void libusby_exit(libusby_context * ctx)
 {
+	libpolly_unref_context(ctx->polly_ctx);
 	usbyb_exit((usbyb_context *)ctx);
 	free(ctx);
 }
@@ -148,7 +165,7 @@ int libusby_bulk_transfer(libusby_device_handle * dev_handle, libusby_endpoint_t
 	int r;
 
 	libusby_device * dev = libusby_get_device(dev_handle);
-	libusby_transfer * tran = libusby_alloc_transfer(dev->ctx, 0);
+	libusby_transfer * tran = libusby_alloc_transfer((libusby_context *)dev->ctx, 0);
 	if (!tran)
 		return LIBUSBY_ERROR_NO_MEM;
 	libusby_fill_bulk_transfer(tran, dev_handle, endpoint, data, length, 0, 0, timeout);
@@ -340,7 +357,7 @@ int libusby_control_transfer(libusby_device_handle * dev_handle, uint8_t bmReque
 
 	uint8_t * buffer = 0;
 	libusby_device * dev = libusby_get_device(dev_handle);
-	libusby_transfer * tran = libusby_alloc_transfer(dev->ctx, 0);
+	libusby_transfer * tran = libusby_alloc_transfer((libusby_context *)dev->ctx, 0);
 	if (!tran)
 		return LIBUSBY_ERROR_NO_MEM;
 
@@ -773,21 +790,6 @@ int libusby_wait_for_transfer(libusby_transfer * transfer)
 {
 	usbyb_transfer * tranb = usbyi_get_tran(transfer);
 	return usbyb_wait_for_transfer(tranb);
-}
-
-int libusby_run_event_loop(libusby_context * ctx)
-{
-	return usbyb_run_event_loop((usbyb_context *)ctx);
-}
-
-void libusby_stop_event_loop(libusby_context * ctx)
-{
-	usbyb_stop_event_loop((usbyb_context *)ctx);
-}
-
-void libusby_reset_event_loop(libusby_context * ctx)
-{
-	usbyb_reset_event_loop((usbyb_context *)ctx);
 }
 
 libusby_transfer * usbyi_get_pub_tran(usbyb_transfer * tran)
