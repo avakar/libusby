@@ -17,7 +17,6 @@ extern "C" {
 typedef struct libusby_context libusby_context;
 typedef struct libusby_device libusby_device;
 typedef struct libusby_device_handle libusby_device_handle;
-typedef libpolly_event_loop libusby_event_loop;
 
 typedef uint8_t libusby_endpoint_t;
 typedef unsigned int libusby_timeout_t;
@@ -204,10 +203,6 @@ void libusby_fill_interrupt_transfer(libusby_transfer * transfer, libusby_device
 int libusby_control_transfer(libusby_device_handle * dev_handle, uint8_t bmRequestType, uint8_t bRequest, uint16_t wValue, uint16_t wIndex, uint8_t * data, uint16_t wLength, libusby_timeout_t timeout);
 int libusby_bulk_transfer(libusby_device_handle * dev_handle, libusby_endpoint_t endpoint, uint8_t * data, int length, int * transferred, libusby_timeout_t timeout);
 int libusby_interrupt_transfer(libusby_device_handle * dev_handle, libusby_endpoint_t endpoint, uint8_t * data, int length, int * transferred, libusby_timeout_t timeout);
-
-/* Event loop */
-int libusby_start_event_loop(libusby_context * ctx, libusby_event_loop ** loop);
-void libusby_join_event_loop(libusby_event_loop * loop);
 
 #ifdef __cplusplus
 }

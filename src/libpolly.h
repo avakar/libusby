@@ -8,14 +8,17 @@ extern "C" {
 #endif
 
 typedef struct libpolly_context libpolly_context;
-typedef struct libpolly_event_loop libpolly_event_loop;
 
 int libpolly_init(libpolly_context ** ctx);
 void libpolly_ref_context(libpolly_context * ctx);
 void libpolly_unref_context(libpolly_context * ctx);
 
-int libpolly_start_event_loop(libpolly_context * ctx, libpolly_event_loop ** loop);
-void libpolly_join_event_loop(libpolly_event_loop * loop);
+typedef void (* libpolly_task_callback)(void * user_data);
+typedef struct libpolly_task libpolly_task;
+int libpolly_prepare_task(libpolly_context * ctx, libpolly_task ** task);
+void libpolly_cancel_task(libpolly_task * task);
+void libpolly_submit_task(libpolly_task * task, libpolly_task_callback callback, void * user_data);
+int libpolly_submit_task_direct(libpolly_context * ctx, libpolly_task_callback callback, void * user_data);
 
 #ifdef __cplusplus
 } // extern "C"

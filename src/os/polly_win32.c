@@ -9,6 +9,14 @@ struct pollyi_entry
 	void * user_data;
 };
 
+struct libpolly_task
+{
+	libpolly_context * ctx;
+	libpolly_task_callback callback;
+	void * user_data;
+	libpolly_task * next;
+};
+
 struct libpolly_context
 {
 	LONG refcount;
@@ -21,16 +29,18 @@ struct libpolly_context
 	int entry_list_size;
 	int entry_list_capacity;
 
+	libpolly_task * task_first;
+	libpolly_task * task_last;
+
 	HANDLE * handle_list;
 	int handle_list_capacity;
-};
 
-struct libpolly_event_loop
-{
-	libpolly_context * ctx;
 	HANDLE hThread;
 	HANDLE hEventLoopStopped;
+	DWORD dwThreadId;
 };
+
+static DWORD WINAPI event_loop_thread_proc(void * param);
 
 int libpolly_init(libpolly_context ** ctx)
 {
@@ -38,6 +48,9 @@ int libpolly_init(libpolly_context ** ctx)
 	if (!res)
 		return LIBUSBY_ERROR_NO_MEM;
 	memset(res, 0, sizeof(libpolly_context));
+
+	InitializeCriticalSection(&res->entry_list_mutex);
+	res->refcount = 1;
 
 	res->hReaperLock = CreateEvent(NULL, FALSE, TRUE, NULL);
 	if (!res->hReaperLock)
@@ -47,16 +60,27 @@ int libpolly_init(libpolly_context ** ctx)
 	if (!res->hHandleListUpdated)
 		goto error;
 
-	InitializeCriticalSection(&res->entry_list_mutex);
-	res->refcount = 1;
+	res->hEventLoopStopped = CreateEvent(NULL, TRUE, FALSE, NULL);
+	if (!res->hEventLoopStopped)
+		goto error;
+
+	res->hThread = CreateThread(0, 0, &event_loop_thread_proc, res, 0, &res->dwThreadId);
+	if (!res->hThread)
+		goto error;
+
 	*ctx = res;
 	return LIBUSBY_SUCCESS;
 
 error:
+	if (res->hThread)
+		CloseHandle(res->hThread);
+	if (res->hEventLoopStopped)
+		CloseHandle(res->hEventLoopStopped);
 	if (res->hHandleListUpdated)
 		CloseHandle(res->hHandleListUpdated);
 	if (res->hReaperLock)
 		CloseHandle(res->hReaperLock);
+	DeleteCriticalSection(&res->entry_list_mutex);
 	free(res);
 	return LIBUSBY_ERROR_NO_MEM;
 }
@@ -71,7 +95,14 @@ void libpolly_unref_context(libpolly_context * ctx)
 	if (InterlockedDecrement(&ctx->refcount) == 0)
 	{
 		assert(ctx->entry_list_size == 0);
+		assert(ctx->task_first == 0);
+		assert(ctx->task_last == 0);
 
+		SetEvent(ctx->hEventLoopStopped);
+		WaitForSingleObject(ctx->hThread, INFINITE);
+		CloseHandle(ctx->hThread);
+
+		CloseHandle(ctx->hEventLoopStopped);
 		CloseHandle(ctx->hReaperLock);
 		CloseHandle(ctx->hHandleListUpdated);
 		free(ctx->entry_list);
@@ -123,6 +154,17 @@ static int libpolly_win32_wait_until_locked(libpolly_context * ctx, HANDLE handl
 		struct pollyi_entry selected_entry;
 
 		EnterCriticalSection(&ctx->entry_list_mutex);
+		while (ctx->task_first)
+		{
+			libpolly_task * task = ctx->task_first;
+			ctx->task_first = task->next;
+			if (!ctx->task_first)
+				ctx->task_last = 0;
+			LeaveCriticalSection(&ctx->entry_list_mutex);
+			task->callback(task->user_data);
+			free(task);
+			EnterCriticalSection(&ctx->entry_list_mutex);
+		}
 
 		if (ctx->handle_list_capacity < 2 + ctx->entry_list_size)
 		{
@@ -151,6 +193,7 @@ static int libpolly_win32_wait_until_locked(libpolly_context * ctx, HANDLE handl
 		original_entry_count = viable_entry_count = ctx->entry_list_size;
 		for (i = 0; i < viable_entry_count; )
 		{
+			assert(ctx->entry_list[i].handle);
 			if (ctx->entry_list[i].handle != handle)
 			{
 				ctx->handle_list[i+2] = ctx->entry_list[i].handle;
@@ -224,49 +267,57 @@ int libpolly_win32_wait_until(libpolly_context * ctx, HANDLE handle)
 
 static DWORD WINAPI event_loop_thread_proc(void * param)
 {
-	libpolly_event_loop * loop = param;
-	return libpolly_win32_wait_until(loop->ctx, loop->hEventLoopStopped);
+	libpolly_context * ctx = param;
+	return libpolly_win32_wait_until(ctx, ctx->hEventLoopStopped);
 }
 
-int libpolly_start_event_loop(libpolly_context * ctx, libpolly_event_loop ** loop)
+void libpolly_submit_task(libpolly_task * task, libpolly_task_callback callback, void * user_data)
 {
-	libpolly_event_loop * res = malloc(sizeof(libpolly_event_loop));
+	libpolly_context * ctx = task->ctx;
+	task->callback = callback;
+	task->user_data = user_data;
+	task->next = 0;
+
+	EnterCriticalSection(&ctx->entry_list_mutex);
+
+	if (ctx->task_last)
+	{
+		assert(ctx->task_first);
+		ctx->task_last->next = task;
+	}
+	else
+	{
+		assert(!ctx->task_first);
+		ctx->task_first = task;
+	}
+
+	ctx->task_last = task;
+	SetEvent(ctx->hHandleListUpdated);
+
+	LeaveCriticalSection(&ctx->entry_list_mutex);
+}
+
+int libpolly_prepare_task(libpolly_context * ctx, libpolly_task ** task)
+{
+	libpolly_task * res = malloc(sizeof(libpolly_task));
 	if (!res)
 		return LIBUSBY_ERROR_NO_MEM;
-
-	res->hEventLoopStopped = CreateEvent(NULL, TRUE, FALSE, NULL);
-	if (!res->hEventLoopStopped)
-	{
-		free(res);
-		return LIBUSBY_ERROR_NO_MEM;
-	}
-
 	res->ctx = ctx;
-	libpolly_ref_context(ctx);
-
-	{
-		DWORD dwThreadId;
-		res->hThread = CreateThread(0, 0, &event_loop_thread_proc, res, 0, &dwThreadId);
-	}
-
-	if (!res->hThread)
-	{
-		libpolly_unref_context(ctx);
-		CloseHandle(res->hEventLoopStopped);
-		free(res);
-		return LIBUSBY_ERROR_NO_MEM;
-	}
-
-	*loop = res;
+	*task = res;
 	return LIBUSBY_SUCCESS;
 }
 
-void libpolly_join_event_loop(libpolly_event_loop * loop)
+void libpolly_cancel_task(libpolly_task * task)
 {
-	SetEvent(loop->hEventLoopStopped);
-	WaitForSingleObject(loop->hThread, INFINITE);
-	CloseHandle(loop->hEventLoopStopped);
-	CloseHandle(loop->hThread);
-	libpolly_unref_context(loop->ctx);
-	free(loop);
+	free(task);
+}
+
+int libpolly_submit_task_direct(libpolly_context * ctx, libpolly_task_callback callback, void * user_data)
+{
+	libpolly_task * task;
+	int r = libpolly_prepare_task(ctx, &task);
+	if (r < 0)
+		return r;
+	libpolly_submit_task(task, callback, user_data);
+	return LIBUSBY_SUCCESS;
 }

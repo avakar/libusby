@@ -346,7 +346,6 @@ static void usbyb_reap_transfer(HANDLE handle, void * user_data)
 {
 	usbyb_transfer * tran = user_data;
 	usbyb_device * dev = tran->pub.dev_handle->dev;
-	usbyb_context * ctx = tran->intrn.ctx;
 
 	DWORD dwTransferred;
 	BOOL res = GetOverlappedResult(dev->hFile, &tran->overlapped, &dwTransferred, TRUE);
