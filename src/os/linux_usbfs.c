@@ -407,6 +407,8 @@ error_unref_dev:
                     libusby_unref_device(&dev->pub);
                 }
             }
+            else
+                close(fd);
 
             pthread_mutex_unlock(&ctx->ctx_mutex);
         }

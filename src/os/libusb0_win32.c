@@ -236,6 +236,8 @@ int usbyb_get_device_list(usbyb_context * ctx, libusby_device *** list)
 				goto error;
 			}
 		}
+		else
+			CloseHandle(hFile);
 
 		LeaveCriticalSection(&ctx->ctx_mutex);
 	}
