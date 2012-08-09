@@ -12,6 +12,6 @@ win32 {
     HEADERS += $$PWD/src/os/libusb0_win32_intf.h
 }
 
-linux-g++ {
+linux-* {
     SOURCES += $$PWD/src/os/linux_usbfs.c
 }
