@@ -11,3 +11,13 @@ win32 {
     SOURCES += \
         $$PWD/src/os/spy_win32.c
 }
+
+unix {
+    SOURCES += \
+        $$PWD/src/os/spy_posix.c
+}
+
+linux-* {
+    SOURCES += \
+        $$PWD/src/os/spy_enum_linux.c
+}

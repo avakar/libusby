@@ -2,6 +2,7 @@
 #define LIBSPY_OS_SPYI_H
 
 #include "../libpolly.h"
+#include "../libspy.h"
 
 typedef struct spyb_context spyb_context;
 typedef struct spyb_device spyb_device;

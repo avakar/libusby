@@ -183,7 +183,7 @@ void spyb_wait_for_transfer(spyb_transfer * transfer)
 	WaitForSingleObject(transfer->hCompletedEvent, INFINITE);
 }
 
-int libspy_get_device_list(libspy_device const ** device_list)
+int libspy_get_device_list(libspy_context * ctx, libspy_device const ** device_list)
 {
 	static GUID const guid_comport = { 0x86e0d1e0L, 0x8089, 0x11d0, 0x9c, 0xe4, 0x08, 0x00, 0x3e, 0x30, 0x1f, 0x73 };
 
@@ -194,6 +194,8 @@ int libspy_get_device_list(libspy_device const ** device_list)
 
 	HDEVINFO hDevInfoSet = SetupDiGetClassDevsA(&guid_comport, 0, 0, DIGCF_DEVICEINTERFACE | DIGCF_PRESENT);
 	int i;
+
+	(void *)ctx;
 
 	for (i = 0;; ++i)
 	{

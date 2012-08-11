@@ -14,6 +14,14 @@ struct pollyi_entry
 	void * user_data;
 };
 
+struct libpolly_task
+{
+	libpolly_context * ctx;
+	libpolly_task_callback callback;
+	void * user_data;
+	struct libpolly_task * next;
+};
+
 struct libpolly_context
 {
 	int refcount;
@@ -38,13 +46,12 @@ struct libpolly_context
 	int loop_token_acquired;
 
 	libpolly_posix_loop_release_registration * release_registration_list;
-};
 
-struct libpolly_event_loop
-{
-	libpolly_context * ctx;
 	pthread_cond_t cond;
 	pthread_t thread;
+
+	libpolly_task * task_first;
+	libpolly_task * task_last;
 };
 
 int libpolly_posix_prepare_add(libpolly_context * ctx)
@@ -112,6 +119,33 @@ void libpolly_posix_add(libpolly_context * ctx, int fd, short events, libpolly_p
 	pthread_mutex_unlock(&ctx->entry_list_mutex);
 }
 
+int libpolly_posix_add_direct(libpolly_context * ctx, int fd, short events, libpolly_posix_callback callback, void * user_data)
+{
+	int r = libpolly_posix_prepare_add(ctx);
+	if (r < 0)
+		return r;
+	libpolly_posix_add(ctx, fd, events, callback, user_data);
+	return LIBUSBY_SUCCESS;
+}
+
+void libpolly_posix_remove(libpolly_context * ctx, void * user_data)
+{
+	int i;
+	pthread_mutex_lock(&ctx->entry_list_mutex);
+	for (i = 0; i < ctx->entry_list_size; ++i)
+	{
+		if (ctx->entry_list[i].user_data == user_data)
+		{
+			struct pollyi_entry entry = ctx->entry_list[i];
+			ctx->entry_list[i] = ctx->entry_list[--ctx->entry_list_size];
+			pthread_mutex_unlock(&ctx->entry_list_mutex);
+			entry.callback(entry.fd, 0, entry.user_data);
+			return;
+		}
+	}
+	pthread_mutex_unlock(&ctx->entry_list_mutex);
+}
+
 pthread_mutex_t * libpolly_posix_get_loop_mutex(libpolly_context * ctx)
 {
 	return &ctx->loop_mutex;
@@ -164,6 +198,8 @@ void libpolly_posix_unregister_loop_release_notification(libpolly_posix_loop_rel
 		registration->next->prev = registration->prev;
 }
 
+static void * pollyb_event_loop(void * param);
+
 int libpolly_init(libpolly_context ** ctx)
 {
 	libpolly_context * res = malloc(sizeof(libpolly_context));
@@ -186,9 +222,20 @@ int libpolly_init(libpolly_context ** ctx)
 	if (pipe(res->control_pipe) != 0)
 		goto error_loop_mutex;
 
+	if (pthread_cond_init(&res->cond, 0) != 0)
+		goto error_control_pipe;
+
+	if (pthread_create(&res->thread, 0, &pollyb_event_loop, res) != 0)
+		goto error_cond;
+
 	*ctx = res;
 	return LIBUSBY_SUCCESS;
-	
+
+error_cond:
+	pthread_cond_destroy(&res->cond);
+error_control_pipe:
+	close(res->control_pipe[0]);
+	close(res->control_pipe[1]);
 error_loop_mutex:
 	pthread_mutex_destroy(&res->loop_mutex);
 error_entry_list_mutex:
@@ -210,6 +257,11 @@ void libpolly_unref_context(libpolly_context * ctx)
 	{
 		assert(ctx->entry_list_size == 0);
 		assert(ctx->entry_list_reserve == 0);
+
+		pthread_cancel(ctx->thread);
+		pthread_join(ctx->thread, 0);
+		pthread_cond_destroy(&ctx->cond);
+
 		free(ctx->entry_list);
 		free(ctx->pollfd_cache);
 		pthread_mutex_destroy(&ctx->loop_mutex);
@@ -282,8 +334,26 @@ int libpolly_posix_run(libpolly_context * ctx, libpolly_posix_run_callback run_c
 		int i;
 		int entry_count;
 		int rcount;
+		libpolly_task * task = 0;
 
 		pthread_mutex_lock(&ctx->entry_list_mutex);
+		if (ctx->task_first)
+		{
+			task = ctx->task_first;
+			ctx->task_first = task->next;
+			if (!task->next)
+				ctx->task_last = 0;
+		}
+		
+		if (task)
+		{
+			pthread_mutex_unlock(&ctx->entry_list_mutex);
+			task->callback(task->user_data);
+			free(task);
+			continue;
+		}
+		
+		
 		if (ctx->pollfd_cache)
 		{
 			// Grab the new cache (it will have higher capacity than our old cache)
@@ -358,19 +428,18 @@ int libpolly_posix_run(libpolly_context * ctx, libpolly_posix_run_callback run_c
 
 static void * pollyb_event_loop(void * param)
 {
-	libpolly_event_loop * loop = param;
-	libpolly_context * ctx = loop->ctx;
+	libpolly_context * ctx = param;
 
 	pthread_mutex_lock(&ctx->loop_mutex);
 	pthread_cleanup_push(&pollyb_unlock_mutex_trampoline, &ctx->loop_mutex);
 	while (libpolly_posix_acquire_loop(ctx) < 0)
 	{
 		libpolly_posix_loop_release_registration reg;
-		reg.cond = &loop->cond;
+		reg.cond = &ctx->cond;
 
 		libpolly_posix_register_loop_release_notification(ctx, &reg);
 		pthread_cleanup_push(&pollyb_unregister_loop_release_notification_trampoline, &reg);
-		pthread_cond_wait(&loop->cond, &ctx->loop_mutex);
+		pthread_cond_wait(&ctx->cond, &ctx->loop_mutex);
 		pthread_cleanup_pop(1);
 	}
 	pthread_cleanup_pop(1);
@@ -382,38 +451,45 @@ static void * pollyb_event_loop(void * param)
 	return 0;
 }
 
-int libpolly_start_event_loop(libpolly_context * ctx, libpolly_event_loop ** loop)
+int libpolly_prepare_task(libpolly_context * ctx, libpolly_task ** task)
 {
-	libpolly_event_loop * res = malloc(sizeof(libpolly_event_loop));
+	libpolly_task * res = malloc(sizeof(libpolly_task));
 	if (!res)
 		return LIBUSBY_ERROR_NO_MEM;
-
-	if (pthread_cond_init(&res->cond, 0) != 0)
-	{
-		free(res);
-		return LIBUSBY_ERROR_NO_MEM;
-	}
-
 	res->ctx = ctx;
-	libpolly_ref_context(ctx);
-
-	if (pthread_create(&res->thread, 0, &pollyb_event_loop, res) != 0)
-	{
-		pthread_cond_destroy(&res->cond);
-		libpolly_unref_context(ctx);
-		free(res);
-		return LIBUSBY_ERROR_NO_MEM;
-	}
-
-	*loop = res;
+	*task = res;
 	return LIBUSBY_SUCCESS;
 }
 
-void libpolly_join_event_loop(libpolly_event_loop * loop)
+void libpolly_cancel_task(libpolly_task * task)
 {
-	pthread_cancel(loop->thread);
-	pthread_join(loop->thread, 0);
-	libpolly_unref_context(loop->ctx);
-	pthread_cond_destroy(&loop->cond);
-	free(loop);
+	free(task);
+}
+
+void libpolly_submit_task(libpolly_task * task, libpolly_task_callback callback, void * user_data)
+{
+	char cmd = 'u';
+
+	task->callback = callback;
+	task->user_data = user_data;
+	task->next = 0;
+
+	pthread_mutex_lock(&task->ctx->loop_mutex);
+	if (task->ctx->task_last)
+		task->ctx->task_last->next = task;
+	task->ctx->task_last = task;
+	if (!task->ctx->task_first)
+		task->ctx->task_first = task;
+	write(task->ctx->control_pipe[1], &cmd, 1);
+	pthread_mutex_unlock(&task->ctx->loop_mutex);
+}
+
+int libpolly_submit_task_direct(libpolly_context * ctx, libpolly_task_callback callback, void * user_data)
+{
+	libpolly_task * task;
+	int r = libpolly_prepare_task(ctx, &task);
+	if (r < 0)
+		return r;
+	libpolly_submit_task(task, callback, user_data);
+	return LIBUSBY_SUCCESS;
 }

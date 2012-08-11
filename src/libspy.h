@@ -62,7 +62,7 @@ int libspy_init(libspy_context ** ctx);
 int libspy_init_with_polly(libspy_context ** ctx, libpolly_context * polly);
 void libspy_exit(libspy_context * ctx);
 
-int libspy_get_device_list(libspy_device const ** device_list);
+int libspy_get_device_list(libspy_context * ctx, libspy_device const ** device_list);
 void libspy_free_device_list(libspy_device const * device_list);
 
 typedef void (* libspy_open_callback)(libspy_open_future * future, void * user_data, libspy_device_handle * handle);

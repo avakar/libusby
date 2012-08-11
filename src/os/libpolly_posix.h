@@ -13,6 +13,10 @@ typedef void (*libpolly_posix_callback)(int fd, short revents, void * user_data)
 int libpolly_posix_prepare_add(libpolly_context * ctx);
 void libpolly_posix_cancel_add(libpolly_context * ctx);
 void libpolly_posix_add(libpolly_context * ctx, int fd, short events, libpolly_posix_callback callback, void * user_data);
+int libpolly_posix_add_direct(libpolly_context * ctx, int fd, short events, libpolly_posix_callback callback, void * user_data);
+
+// must be called from within the loop
+void libpolly_posix_remove(libpolly_context * ctx, void * user_data);
 
 pthread_mutex_t * libpolly_posix_get_loop_mutex(libpolly_context * ctx);
 
