@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <libudev.h>
+#include <string.h>
 
 static char * spyi_strdup(char const * str)
 {
@@ -18,13 +19,13 @@ int libspy_get_device_list(libspy_context * ctx, libspy_device const ** device_l
 	struct udev_enumerate * en = 0;
 	struct udev_list_entry *devices, *dev_list_entry;
 	struct udev_device *dev = 0;
-	libspy_device spy_dev = {0};
+	libspy_device spy_dev = {0, 0, 0};
 	
 	libspy_device * res = 0;
 	int res_capacity = 0;
 	int res_size = 0;
-	
-	(void *)ctx;
+
+	(void)ctx;
 
 	udev_ctx = udev_new();
 	if (!udev_ctx)
@@ -86,8 +87,8 @@ error:
 		libspy_free_device_list(res);
 	if (dev)
 		udev_device_unref(dev);
-	free(spy_dev.path);
-	free(spy_dev.name);
+	free((void *)spy_dev.path);
+	free((void *)spy_dev.name);
 	if (en)
 		udev_enumerate_unref(en);
 	if (udev_ctx)
