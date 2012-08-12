@@ -2,8 +2,7 @@ SOURCES += \
     $$PWD/src/libspy.c
 HEADERS += \
     $$PWD/src/libspy.h \
-    $$PWD/src/libspy.hpp \
-    $$PWD/src/os/spy.h
+    $$PWD/src/libspy.hpp
 
 INCLUDEPATH += $$PWD/src
 

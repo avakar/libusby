@@ -1,9 +1,9 @@
 #include "../libspy.h"
-#include "spy.h"
 #include "libpolly_posix.h"
 #include <assert.h>
 #include <libudev.h>
 #include <stdio.h>
+#include <memory.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -17,38 +17,75 @@
 
 #include <stdlib.h>
 
-struct spyb_context
+struct libspy_context
 {
-	libspy_context pub;
+	libpolly_context * polly;
 	pthread_mutex_t * loop_mutex;
 };
 
 struct libspy_device_handle
 {
-	spyb_context * ctx;
+	libspy_context * ctx;
 	int fd;
 };
 
-struct spyb_transfer
+typedef enum spyi_transfer_flags
 {
-	libspy_transfer pub;
+	spyi_tf_resubmit = 1
+} spyi_transfer_flags;
+
+struct libspy_transfer
+{
+	libspy_context * ctx;
+	void * user_data;
+
+	uint8_t * buf;
+	int length;
+	int actual_length;
+
+	int flags;
+
+	libspy_device_handle * handle;
+	void (* callback)(libspy_transfer * transfer, libspy_transfer_status status);
+
 	pthread_cond_t cond;
 	int active;
 	libpolly_task * cancel_task;
 };
 
-int const spyb_context_size = sizeof(spyb_context);
-int const spyb_transfer_size = sizeof(spyb_transfer);
-
-int spyb_init(spyb_context * ctx)
+void libspy_set_user_data(libspy_transfer * transfer, void * user_data)
 {
-	ctx->loop_mutex = libpolly_posix_get_loop_mutex(ctx->pub.polly);
+	transfer->user_data = user_data;
+}
+
+void * libspy_get_user_data(libspy_transfer * transfer)
+{
+	return transfer->user_data;
+}
+
+int libspy_get_transfer_length(libspy_transfer * transfer)
+{
+	return transfer->actual_length;
+}
+
+int libspy_init_with_polly(libspy_context ** ctx, libpolly_context * polly)
+{
+	libspy_context * res = malloc(sizeof(libspy_context));
+	if (!res)
+		return LIBSPY_ERROR_NO_MEM;
+
+	res->polly = polly;
+	res->loop_mutex = libpolly_posix_get_loop_mutex(polly);
+
+	libpolly_ref_context(polly);
+	*ctx = res;
 	return LIBSPY_SUCCESS;
 }
 
-void spyb_exit(spyb_context * ctx)
+void libspy_exit(libspy_context * ctx)
 {
-	(void)ctx;
+	libpolly_unref_context(ctx->polly);
+	free(ctx);
 }
 
 void libspy_close(libspy_device_handle *handle)
@@ -99,7 +136,7 @@ int libspy_open(libspy_context * ctx, char const * path, libspy_device_settings 
 	if (!res)
 		return LIBUSBY_ERROR_NO_MEM;
 
-	res->ctx = (spyb_context *)ctx;
+	res->ctx = (libspy_context *)ctx;
 	res->fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK);
 	if (res->fd < 0)
 	{
@@ -210,28 +247,35 @@ void libspy_free_open_future(libspy_open_future *future)
 	(void)future;
 }
 
-int spyb_init_transfer(spyb_transfer *transfer)
+libspy_transfer * libspy_alloc_transfer(libspy_context * ctx)
 {
-	if (pthread_cond_init(&transfer->cond, 0) != 0)
-		return LIBUSBY_ERROR_NO_MEM;
+	libspy_transfer * res = malloc(sizeof(libspy_transfer));
+	if (!res)
+		return 0;
+	memset(res, 0, sizeof *res);
 
-	transfer->cancel_task = 0;
-	transfer->active = 0;
-	return LIBUSBY_SUCCESS;
+	if (pthread_cond_init(&res->cond, 0) != 0)
+		return 0;
+
+	res->cancel_task = 0;
+	res->active = 0;
+
+	res->ctx = ctx;
+	return res;
 }
 
-void spyb_destroy_transfer(spyb_transfer *transfer)
+void libspy_free_transfer(libspy_transfer * transfer)
 {
 	assert(transfer->active == 0);
 	assert(transfer->cancel_task == 0);
 	pthread_cond_destroy(&transfer->cond);
+	free(transfer);
 }
 
 static void spyb_read_ready_callback(int fd, short revents, void * user_data)
 {
-	spyb_transfer * tranpriv = user_data;
-	libspy_transfer * transfer = &tranpriv->pub;
-	spyb_context * ctx = transfer->ctx;
+	libspy_transfer * transfer = user_data;
+	libspy_context * ctx = transfer->ctx;
 	int r;
 	
 	if (revents == 0)
@@ -240,11 +284,11 @@ static void spyb_read_ready_callback(int fd, short revents, void * user_data)
 			transfer->callback(transfer, libspy_transfer_canceled);
 
 		pthread_mutex_lock(ctx->loop_mutex);
-		tranpriv->active = 0;
-		if (tranpriv->cancel_task)
+		transfer->active = 0;
+		if (transfer->cancel_task)
 		{
-			libpolly_cancel_task(tranpriv->cancel_task);
-			tranpriv->cancel_task = 0;
+			libpolly_cancel_task(transfer->cancel_task);
+			transfer->cancel_task = 0;
 		}
 	}
 	else
@@ -274,45 +318,53 @@ static void spyb_read_ready_callback(int fd, short revents, void * user_data)
 		pthread_mutex_lock(ctx->loop_mutex);
 		if (transfer->flags & spyi_tf_resubmit)
 		{
-			if (libpolly_posix_add_direct(ctx->pub.polly, fd, POLLIN, &spyb_read_ready_callback, user_data) < 0)
+			if (libpolly_posix_add_direct(ctx->polly, fd, POLLIN, &spyb_read_ready_callback, user_data) < 0)
 			{
 				pthread_mutex_unlock(ctx->loop_mutex);
 				if (transfer->callback)
 					transfer->callback(transfer, libspy_transfer_error);
 	
 				pthread_mutex_lock(ctx->loop_mutex);
-				tranpriv->active = 0;
-				if (tranpriv->cancel_task)
+				transfer->active = 0;
+				if (transfer->cancel_task)
 				{
-					libpolly_cancel_task(tranpriv->cancel_task);
-					tranpriv->cancel_task = 0;
+					libpolly_cancel_task(transfer->cancel_task);
+					transfer->cancel_task = 0;
 				}
 			}
 		}
 		else
 		{
-			tranpriv->active = 0;
-			if (tranpriv->cancel_task)
+			transfer->active = 0;
+			if (transfer->cancel_task)
 			{
-				libpolly_cancel_task(tranpriv->cancel_task);
-				tranpriv->cancel_task = 0;
+				libpolly_cancel_task(transfer->cancel_task);
+				transfer->cancel_task = 0;
 			}
 		}
 	}
 
-	pthread_cond_broadcast(&tranpriv->cond);
+	pthread_cond_broadcast(&transfer->cond);
 	pthread_mutex_unlock(ctx->loop_mutex);
 }
 
-int spyb_submit_read(spyb_transfer *transfer)
+int libspy_submit_continuous_read(libspy_transfer * transfer,
+	libspy_device_handle * handle, uint8_t * buf, int len,
+	void (* callback)(libspy_transfer * transfer, libspy_transfer_status status))
 {
-	libspy_context * ctx = &transfer->pub.ctx->pub;
-	libspy_device_handle * handle = transfer->pub.handle;
-	
+	libspy_context * ctx = transfer->ctx;
+	int r;
+
 	assert(transfer->active == 0);
 	assert(transfer->cancel_task == 0);
 
-	int r = libpolly_prepare_task(ctx->polly, &transfer->cancel_task);
+	transfer->callback = callback;
+	transfer->handle = handle;
+	transfer->flags = spyi_tf_resubmit;
+	transfer->buf = buf;
+	transfer->length = len;
+
+	r = libpolly_prepare_task(ctx->polly, &transfer->cancel_task);
 	if (r < 0)
 		return r;
 	r = libpolly_posix_add_direct(ctx->polly, handle->fd, POLLIN, &spyb_read_ready_callback, transfer);
@@ -330,14 +382,14 @@ int spyb_submit_read(spyb_transfer *transfer)
 
 static void spyb_cancel_callback(void * user_data)
 {
-	spyb_transfer * transfer = user_data;
-	libpolly_posix_remove(transfer->pub.ctx->pub.polly, user_data);
+	libspy_transfer * transfer = user_data;
+	libpolly_posix_remove(transfer->ctx->polly, user_data);
 }
 
-void spyb_cancel_transfer(spyb_transfer *transfer)
+void libspy_cancel_transfer(libspy_transfer * transfer)
 {
 	libpolly_task * task = 0;
-	spyb_context * ctx = transfer->pub.ctx;
+	libspy_context * ctx = transfer->ctx;
 
 	pthread_mutex_lock(ctx->loop_mutex);
 	if (transfer->cancel_task)
@@ -351,14 +403,14 @@ void spyb_cancel_transfer(spyb_transfer *transfer)
 		libpolly_submit_task(task, &spyb_cancel_callback, transfer);
 }
 
-void spyb_wait_for_transfer(spyb_transfer *transfer)
+void libspy_wait_for_transfer(libspy_transfer * transfer)
 {
-	spyb_context * ctx = transfer->pub.ctx;
+	libspy_context * ctx = transfer->ctx;
 	libpolly_posix_loop_release_registration reg;
 	reg.cond = &transfer->cond;
 
 	pthread_mutex_lock(ctx->loop_mutex);
-	libpolly_posix_register_loop_release_notification(ctx->pub.polly, &reg);
+	libpolly_posix_register_loop_release_notification(ctx->polly, &reg);
 
 	while (transfer->active)
 		pthread_cond_wait(&transfer->cond, ctx->loop_mutex);

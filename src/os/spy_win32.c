@@ -1,5 +1,4 @@
 #include "../libspy.h"
-#include "spy.h"
 #include "libpolly_win32.h"
 #include <windows.h>
 #include <setupapi.h>
@@ -9,9 +8,9 @@
 typedef BOOL WINAPI CancelIoEx_t(HANDLE hFile, LPOVERLAPPED lpOverlapped);
 typedef BOOL WINAPI CancelSynchronousIo_t(HANDLE hThread);
 
-struct spyb_context
+struct libspy_context
 {
-	libspy_context pub;
+	libpolly_context * polly;
 	HMODULE hKernel32;
 	CancelIoEx_t * CancelIoEx;
 	CancelSynchronousIo_t * CancelSynchronousIo;
@@ -19,13 +18,29 @@ struct spyb_context
 
 struct libspy_device_handle
 {
-	spyb_context * ctx;
+	libspy_context * ctx;
 	HANDLE hFile;
 };
 
-struct spyb_transfer
+typedef enum spyi_transfer_flags
 {
-	libspy_transfer pub;
+	spyi_tf_resubmit = 1
+} spyi_transfer_flags;
+
+struct libspy_transfer
+{
+	libspy_context * ctx;
+	void * user_data;
+
+	uint8_t * buf;
+	int length;
+	int actual_length;
+
+	int flags;
+
+	libspy_device_handle * handle;
+	void (* callback)(libspy_transfer * transfer, libspy_transfer_status status);
+
 	CRITICAL_SECTION transfer_mutex;
 	libpolly_task * cancel_task;
 	HANDLE hCompletedEvent;
@@ -34,7 +49,7 @@ struct spyb_transfer
 
 struct libspy_open_future
 {
-	spyb_context * ctx;
+	libspy_context * ctx;
 	WCHAR * path;
 	libspy_open_callback callback;
 	void * callback_data;
@@ -44,69 +59,54 @@ struct libspy_open_future
 	int timeout;
 };
 
-int const spyb_context_size = sizeof(spyb_context);
-int const spyb_transfer_size = sizeof(spyb_transfer);
+static void spyi_submit_read_callback(void * user_data);
+static void spyb_complete_transfer_locked(libspy_transfer * transfer);
+static void spyb_read_completed(HANDLE handle, void * user_data);
+static WCHAR * to_utf16(char const * utf8);
+static char * to_utf8(WCHAR const * utf16);
+static DWORD WINAPI open_thread_proc(LPVOID param);
+static void spyb_complete_transfer_locked(libspy_transfer * transfer);
+static void spyb_read_completed(HANDLE handle, void * user_data);
+static void spyi_submit_read_callback(void * user_data);
+static void spyi_cancel_transfer_callback(void * user_data);
 
-static WCHAR * to_utf16(char const * utf8)
+int libspy_init_with_polly(libspy_context ** ctx, libpolly_context * polly)
 {
-	int len = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, 0, 0);
-	WCHAR * res = malloc(len*2+2);
+	libspy_context * res = malloc(sizeof(libspy_context));
 	if (!res)
-		return 0;
-	len = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, res, len+1);
-	res[len] = 0;
-	return res;
-}
+		return LIBSPY_ERROR_NO_MEM;
+	memset(res, 0, sizeof *res);
 
-static char * to_utf8(WCHAR const * utf16)
-{
-	int src_len = wcslen(utf16);
-	int buf_size = WideCharToMultiByte(CP_UTF8, 0, utf16, src_len, 0, 0, 0, 0);
-	char * res = malloc(buf_size+1);
-	if (!res)
-		return 0;
-
-	buf_size = WideCharToMultiByte(CP_UTF8, 0, utf16, src_len, res, buf_size, 0, 0);
-	res[buf_size] = 0;
-	return res;
-}
-
-int spyb_init(spyb_context * ctx)
-{
-	ctx->hKernel32 = LoadLibraryW(L"kernel32.dll");
-	if (ctx->hKernel32)
+	res->polly = polly;
+	res->hKernel32 = LoadLibraryW(L"kernel32.dll");
+	if (res->hKernel32)
 	{
-		ctx->CancelIoEx = (CancelIoEx_t *)GetProcAddress(ctx->hKernel32, "CancelIoEx");
-		ctx->CancelSynchronousIo = (CancelSynchronousIo_t *)GetProcAddress(ctx->hKernel32, "CancelSynchronousIo");
+		res->CancelIoEx = (CancelIoEx_t *)GetProcAddress(res->hKernel32, "CancelIoEx");
+		res->CancelSynchronousIo = (CancelSynchronousIo_t *)GetProcAddress(res->hKernel32, "CancelSynchronousIo");
 	}
 
+	libpolly_ref_context(polly);
+	*ctx = res;
 	return LIBSPY_SUCCESS;
 }
 
-void spyb_exit(spyb_context * ctx)
+void libspy_exit(libspy_context * ctx)
 {
 	if (ctx->hKernel32)
 		FreeLibrary(ctx->hKernel32);
+	libpolly_unref_context(ctx->polly);
+	free(ctx);
 }
 
-void spyi_cancel_transfer_callback(void * user_data)
-{
-	spyb_transfer * transfer = user_data;
-	EnterCriticalSection(&transfer->transfer_mutex);
-	if (transfer->pub.handle)
-		CancelIo(transfer->pub.handle->hFile);
-	LeaveCriticalSection(&transfer->transfer_mutex);
-}
-
-void spyb_cancel_transfer(spyb_transfer * transfer)
+void libspy_cancel_transfer(libspy_transfer * transfer)
 {
 	EnterCriticalSection(&transfer->transfer_mutex);
-	if (transfer->pub.handle)
+	if (transfer->handle)
 	{
-		transfer->pub.flags &= ~spyi_tf_resubmit;
-		if (transfer->pub.ctx->CancelIoEx)
+		transfer->flags &= ~spyi_tf_resubmit;
+		if (transfer->ctx->CancelIoEx)
 		{
-			transfer->pub.ctx->CancelIoEx(transfer->pub.handle->hFile, &transfer->o);
+			transfer->ctx->CancelIoEx(transfer->handle->hFile, &transfer->o);
 		}
 		else if (transfer->cancel_task)
 		{
@@ -154,33 +154,59 @@ int libspy_write(libspy_device_handle * handle, uint8_t const * buf, int len)
 	return dwTransferred;
 }
 
-int spyb_init_transfer(spyb_transfer * transfer)
+libspy_transfer * libspy_alloc_transfer(libspy_context * ctx)
 {
-	transfer->hCompletedEvent = CreateEvent(NULL, TRUE, TRUE, NULL);
-	if (!transfer->hCompletedEvent)
-		return LIBSPY_ERROR_NO_MEM;
+	libspy_transfer * res = malloc(sizeof(libspy_transfer));
+	if (!res)
+		return 0;
+	memset(res, 0, sizeof *res);
 
-	transfer->o.hEvent = CreateEvent(NULL, TRUE, TRUE, NULL);
-	if (!transfer->o.hEvent)
+	res->hCompletedEvent = CreateEvent(NULL, TRUE, TRUE, NULL);
+	if (!res->hCompletedEvent)
 	{
-		CloseHandle(transfer->hCompletedEvent);
-		return LIBSPY_ERROR_NO_MEM;
+		free(res);
+		return 0;
 	}
 
-	InitializeCriticalSection(&transfer->transfer_mutex);
-	return LIBSPY_SUCCESS;
+	res->o.hEvent = CreateEvent(NULL, TRUE, TRUE, NULL);
+	if (!res->o.hEvent)
+	{
+		CloseHandle(res->hCompletedEvent);
+		free(res);
+		return 0;
+	}
+
+	res->ctx = ctx;
+	InitializeCriticalSection(&res->transfer_mutex);
+	return res;
 }
 
-void spyb_destroy_transfer(spyb_transfer * transfer)
+void libspy_free_transfer(libspy_transfer * transfer)
 {
 	DeleteCriticalSection(&transfer->transfer_mutex);
 	CloseHandle(transfer->o.hEvent);
 	CloseHandle(transfer->hCompletedEvent);
+	free(transfer);
 }
 
-void spyb_wait_for_transfer(spyb_transfer * transfer)
+void libspy_wait_for_transfer(libspy_transfer * transfer)
 {
 	WaitForSingleObject(transfer->hCompletedEvent, INFINITE);
+}
+
+void libspy_set_user_data(libspy_transfer * transfer, void * user_data)
+{
+	transfer->user_data = user_data;
+}
+
+void * libspy_get_user_data(libspy_transfer * transfer)
+{
+	return transfer->user_data;
+}
+
+int libspy_get_transfer_length(libspy_transfer * transfer)
+{
+	return transfer->actual_length;
 }
 
 int libspy_get_device_list(libspy_context * ctx, libspy_device const ** device_list)
@@ -195,7 +221,7 @@ int libspy_get_device_list(libspy_context * ctx, libspy_device const ** device_l
 	HDEVINFO hDevInfoSet = SetupDiGetClassDevsA(&guid_comport, 0, 0, DIGCF_DEVICEINTERFACE | DIGCF_PRESENT);
 	int i;
 
-	(void *)ctx;
+	(void)ctx;
 
 	for (i = 0;; ++i)
 	{
@@ -280,121 +306,29 @@ out:
 	return r;
 }
 
-static void spyi_submit_read_callback(void * user_data);
-
-static void spyb_complete_transfer_locked(spyb_transfer * transfer)
-{
-	if (transfer->cancel_task)
-	{
-		libpolly_cancel_task(transfer->cancel_task);
-		transfer->cancel_task = 0;
-	}
-	SetEvent(transfer->hCompletedEvent);
-}
-
-static void spyb_read_completed(HANDLE handle, void * user_data)
-{
-	spyb_transfer * transfer = user_data;
-
-	DWORD dwTransferred;
-	if (!GetOverlappedResult(handle, &transfer->o, &dwTransferred, TRUE))
-	{
-		DWORD dwError = GetLastError();
-		if (transfer->pub.callback)
-			transfer->pub.callback(&transfer->pub, dwError == ERROR_CANCELLED? libspy_transfer_canceled: libspy_transfer_error);
-	}
-	else
-	{
-		transfer->pub.actual_length = dwTransferred;
-		if (transfer->pub.callback)
-			transfer->pub.callback(&transfer->pub, libspy_transfer_completed);
-	}
-
-	EnterCriticalSection(&transfer->transfer_mutex);
-	if (transfer->pub.flags & spyi_tf_resubmit)
-		spyi_submit_read_callback(transfer);
-	else
-		spyb_complete_transfer_locked(transfer);
-	LeaveCriticalSection(&transfer->transfer_mutex);
-}
-
-static void spyi_submit_read_callback(void * user_data)
-{
-	spyb_transfer * transfer = user_data;
-	spyb_context * ctx = transfer->pub.ctx;
-	DWORD dwTransferred;
-	if (!ReadFile(transfer->pub.handle->hFile, transfer->pub.buf, transfer->pub.length, &dwTransferred, &transfer->o))
-	{
-		DWORD dwError = GetLastError();
-		if (dwError != ERROR_IO_PENDING)
-		{
-			if (transfer->pub.callback)
-				transfer->pub.callback(&transfer->pub, libspy_transfer_error);
-		}
-		else
-		{
-			if (libpolly_win32_add_handle(ctx->pub.polly, transfer->o.hEvent, &spyb_read_completed, transfer) < 0)
-			{
-				CancelIo(transfer->pub.handle->hFile);
-				if (!GetOverlappedResult(transfer->pub.handle->hFile, &transfer->o, &dwTransferred, TRUE))
-				{
-					if (transfer->pub.callback)
-						transfer->pub.callback(&transfer->pub, libspy_transfer_error);
-				}
-				else
-				{
-					transfer->pub.actual_length = dwTransferred;
-					if (transfer->pub.callback)
-						transfer->pub.callback(&transfer->pub, libspy_transfer_completed);
-				}
-				EnterCriticalSection(&transfer->transfer_mutex);
-				spyb_complete_transfer_locked(transfer);
-				LeaveCriticalSection(&transfer->transfer_mutex);
-			}
-		}
-	}
-	else
-	{
-		transfer->pub.actual_length = dwTransferred;
-		if (transfer->pub.callback)
-			transfer->pub.callback(&transfer->pub, libspy_transfer_completed);
-
-		EnterCriticalSection(&transfer->transfer_mutex);
-		if (transfer->pub.flags & spyi_tf_resubmit)
-		{
-			int r = libpolly_submit_task_direct(transfer->pub.ctx->pub.polly, &spyi_submit_read_callback, transfer);
-			if (r < 0)
-			{
-				LeaveCriticalSection(&transfer->transfer_mutex);
-				if (transfer->pub.callback)
-					transfer->pub.callback(&transfer->pub, libspy_transfer_error);
-				EnterCriticalSection(&transfer->transfer_mutex);
-				spyb_complete_transfer_locked(transfer);
-			}
-		}
-		else
-		{
-			spyb_complete_transfer_locked(transfer);
-		}
-		LeaveCriticalSection(&transfer->transfer_mutex);
-	}
-}
-
-int spyb_submit_read(spyb_transfer * transfer)
+int libspy_submit_continuous_read(libspy_transfer * transfer,
+	libspy_device_handle * handle, uint8_t * buf, int len,
+	void (* callback)(libspy_transfer * transfer, libspy_transfer_status status))
 {
 	int r;
 
+	transfer->callback = callback;
+	transfer->handle = handle;
+	transfer->flags = spyi_tf_resubmit;
+	transfer->buf = buf;
+	transfer->length = len;
+
 	EnterCriticalSection(&transfer->transfer_mutex);
 	assert(!transfer->cancel_task);
-	if (!transfer->pub.ctx->CancelIoEx)
+	if (!transfer->ctx->CancelIoEx)
 	{
-		r = libpolly_prepare_task(transfer->pub.ctx->pub.polly, &transfer->cancel_task);
+		r = libpolly_prepare_task(transfer->ctx->polly, &transfer->cancel_task);
 		if (r < 0)
 			goto out;
 	}
 
 	ResetEvent(transfer->hCompletedEvent);
-	r = libpolly_submit_task_direct(transfer->pub.ctx->pub.polly, &spyi_submit_read_callback, transfer);
+	r = libpolly_submit_task_direct(transfer->ctx->polly, &spyi_submit_read_callback, transfer);
 	if (r < 0)
 	{
 		SetEvent(transfer->hCompletedEvent);
@@ -410,49 +344,6 @@ out:
 	return r;
 }
 
-static DWORD WINAPI open_thread_proc(LPVOID param)
-{
-	libspy_open_future * future = param;
-	libspy_device_handle * handle = 0;
-
-	HANDLE hFile = CreateFile(future->path, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, 0);
-	if (hFile == INVALID_HANDLE_VALUE)
-	{
-		future->dwError = GetLastError();
-	}
-	else
-	{
-		future->dwError = 0;
-		handle = malloc(sizeof(libspy_device_handle));
-		if (!handle)
-		{
-			CloseHandle(hFile);
-			future->dwError = ERROR_NOT_ENOUGH_MEMORY;
-		}
-		else
-		{
-			handle->ctx = future->ctx;
-			handle->hFile = hFile;
-		}
-	}
-
-	if (handle)
-	{
-		COMMTIMEOUTS timeouts;
-		timeouts.ReadIntervalTimeout = MAXDWORD;
-		timeouts.ReadTotalTimeoutConstant = future->timeout;
-		timeouts.ReadTotalTimeoutMultiplier = MAXDWORD;
-		timeouts.WriteTotalTimeoutConstant = 0;
-		timeouts.WriteTotalTimeoutMultiplier = 0;
-		SetCommTimeouts(handle->hFile, &timeouts);
-
-		SetCommState(handle->hFile, &future->dcb);
-	}
-
-	future->callback(future, future->callback_data, handle);
-	return 0;
-}
-
 int libspy_begin_open(libspy_context * ctx, char const * path, libspy_device_settings const * settings, libspy_open_callback callback, void * user_data, libspy_open_future ** future)
 {
 	DWORD dwThreadId;
@@ -465,7 +356,7 @@ int libspy_begin_open(libspy_context * ctx, char const * path, libspy_device_set
 		return LIBUSBY_ERROR_NO_MEM;
 	memset(res, 0, sizeof *res);
 
-	res->ctx = (spyb_context *)ctx;
+	res->ctx = (libspy_context *)ctx;
 	res->callback = callback;
 	res->callback_data = user_data;
 	res->path = to_utf16(path);
@@ -532,7 +423,7 @@ int libspy_begin_open(libspy_context * ctx, char const * path, libspy_device_set
 
 int libspy_is_open_cancelable(libspy_context * ctx)
 {
-	spyb_context * ctxb = (spyb_context *)ctx;
+	libspy_context * ctxb = (libspy_context *)ctx;
 	return ctxb->CancelSynchronousIo != 0;
 }
 
@@ -552,4 +443,178 @@ void libspy_free_open_future(libspy_open_future * future)
 	CloseHandle(future->hOpenThread);
 	free(future->path);
 	free(future);
+}
+
+static WCHAR * to_utf16(char const * utf8)
+{
+	int len = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, 0, 0);
+	WCHAR * res = malloc(len*2+2);
+	if (!res)
+		return 0;
+	len = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, res, len+1);
+	res[len] = 0;
+	return res;
+}
+
+static char * to_utf8(WCHAR const * utf16)
+{
+	int src_len = wcslen(utf16);
+	int buf_size = WideCharToMultiByte(CP_UTF8, 0, utf16, src_len, 0, 0, 0, 0);
+	char * res = malloc(buf_size+1);
+	if (!res)
+		return 0;
+
+	buf_size = WideCharToMultiByte(CP_UTF8, 0, utf16, src_len, res, buf_size, 0, 0);
+	res[buf_size] = 0;
+	return res;
+}
+
+static DWORD WINAPI open_thread_proc(LPVOID param)
+{
+	libspy_open_future * future = param;
+	libspy_device_handle * handle = 0;
+
+	HANDLE hFile = CreateFile(future->path, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, 0);
+	if (hFile == INVALID_HANDLE_VALUE)
+	{
+		future->dwError = GetLastError();
+	}
+	else
+	{
+		future->dwError = 0;
+		handle = malloc(sizeof(libspy_device_handle));
+		if (!handle)
+		{
+			CloseHandle(hFile);
+			future->dwError = ERROR_NOT_ENOUGH_MEMORY;
+		}
+		else
+		{
+			handle->ctx = future->ctx;
+			handle->hFile = hFile;
+		}
+	}
+
+	if (handle)
+	{
+		COMMTIMEOUTS timeouts;
+		timeouts.ReadIntervalTimeout = MAXDWORD;
+		timeouts.ReadTotalTimeoutConstant = future->timeout;
+		timeouts.ReadTotalTimeoutMultiplier = MAXDWORD;
+		timeouts.WriteTotalTimeoutConstant = 0;
+		timeouts.WriteTotalTimeoutMultiplier = 0;
+		SetCommTimeouts(handle->hFile, &timeouts);
+
+		SetCommState(handle->hFile, &future->dcb);
+	}
+
+	future->callback(future, future->callback_data, handle);
+	return 0;
+}
+
+static void spyb_complete_transfer_locked(libspy_transfer * transfer)
+{
+	if (transfer->cancel_task)
+	{
+		libpolly_cancel_task(transfer->cancel_task);
+		transfer->cancel_task = 0;
+	}
+	SetEvent(transfer->hCompletedEvent);
+}
+
+static void spyb_read_completed(HANDLE handle, void * user_data)
+{
+	libspy_transfer * transfer = user_data;
+
+	DWORD dwTransferred;
+	if (!GetOverlappedResult(handle, &transfer->o, &dwTransferred, TRUE))
+	{
+		DWORD dwError = GetLastError();
+		if (transfer->callback)
+			transfer->callback(transfer, dwError == ERROR_CANCELLED? libspy_transfer_canceled: libspy_transfer_error);
+	}
+	else
+	{
+		transfer->actual_length = dwTransferred;
+		if (transfer->callback)
+			transfer->callback(transfer, libspy_transfer_completed);
+	}
+
+	EnterCriticalSection(&transfer->transfer_mutex);
+	if (transfer->flags & spyi_tf_resubmit)
+		spyi_submit_read_callback(transfer);
+	else
+		spyb_complete_transfer_locked(transfer);
+	LeaveCriticalSection(&transfer->transfer_mutex);
+}
+
+static void spyi_submit_read_callback(void * user_data)
+{
+	libspy_transfer * transfer = user_data;
+	libspy_context * ctx = transfer->ctx;
+	DWORD dwTransferred;
+	if (!ReadFile(transfer->handle->hFile, transfer->buf, transfer->length, &dwTransferred, &transfer->o))
+	{
+		DWORD dwError = GetLastError();
+		if (dwError != ERROR_IO_PENDING)
+		{
+			if (transfer->callback)
+				transfer->callback(transfer, libspy_transfer_error);
+		}
+		else
+		{
+			if (libpolly_win32_add_handle(ctx->polly, transfer->o.hEvent, &spyb_read_completed, transfer) < 0)
+			{
+				CancelIo(transfer->handle->hFile);
+				if (!GetOverlappedResult(transfer->handle->hFile, &transfer->o, &dwTransferred, TRUE))
+				{
+					if (transfer->callback)
+						transfer->callback(transfer, libspy_transfer_error);
+				}
+				else
+				{
+					transfer->actual_length = dwTransferred;
+					if (transfer->callback)
+						transfer->callback(transfer, libspy_transfer_completed);
+				}
+				EnterCriticalSection(&transfer->transfer_mutex);
+				spyb_complete_transfer_locked(transfer);
+				LeaveCriticalSection(&transfer->transfer_mutex);
+			}
+		}
+	}
+	else
+	{
+		transfer->actual_length = dwTransferred;
+		if (transfer->callback)
+			transfer->callback(transfer, libspy_transfer_completed);
+
+		EnterCriticalSection(&transfer->transfer_mutex);
+		if (transfer->flags & spyi_tf_resubmit)
+		{
+			int r = libpolly_submit_task_direct(transfer->ctx->polly, &spyi_submit_read_callback, transfer);
+			if (r < 0)
+			{
+				LeaveCriticalSection(&transfer->transfer_mutex);
+				if (transfer->callback)
+					transfer->callback(transfer, libspy_transfer_error);
+				EnterCriticalSection(&transfer->transfer_mutex);
+				spyb_complete_transfer_locked(transfer);
+			}
+		}
+		else
+		{
+			spyb_complete_transfer_locked(transfer);
+		}
+		LeaveCriticalSection(&transfer->transfer_mutex);
+	}
+}
+
+static void spyi_cancel_transfer_callback(void * user_data)
+{
+	libspy_transfer * transfer = user_data;
+	EnterCriticalSection(&transfer->transfer_mutex);
+	if (transfer->handle)
+		CancelIo(transfer->handle->hFile);
+	LeaveCriticalSection(&transfer->transfer_mutex);
 }
