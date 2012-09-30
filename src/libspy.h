@@ -62,6 +62,8 @@ int libspy_init(libspy_context ** ctx);
 int libspy_init_with_polly(libspy_context ** ctx, libpolly_context * polly);
 void libspy_exit(libspy_context * ctx);
 
+libpolly_context * libspy_get_polly(libspy_context * ctx);
+
 int libspy_get_device_list(libspy_context * ctx, libspy_device const ** device_list);
 void libspy_free_device_list(libspy_device const * device_list);
 
@@ -72,7 +74,9 @@ void libspy_cancel_open(libspy_open_future * future);
 void libspy_wait_for_open(libspy_open_future * future);
 void libspy_free_open_future(libspy_open_future * future);
 
+int libspy_open(libspy_context * ctx, char const * path, libspy_device_settings const * settings, libspy_device_handle ** handle);
 void libspy_close(libspy_device_handle * handle);
+libspy_context * libspy_get_context(libspy_device_handle * handle);
 
 int libspy_read(libspy_device_handle * handle, uint8_t * buf, int len);
 int libspy_write(libspy_device_handle * handle, uint8_t const * buf, int len);
@@ -87,8 +91,12 @@ void * libspy_get_user_data(libspy_transfer * transfer);
 
 int libspy_get_transfer_length(libspy_transfer * transfer);
 
-int libspy_submit_continuous_read(libspy_transfer * transfer,
+int libspy_submit_read(libspy_transfer * transfer,
 	libspy_device_handle * handle, uint8_t * buf, int len,
+	void (* callback)(libspy_transfer * transfer, libspy_transfer_status status));
+
+int libspy_submit_write(libspy_transfer * transfer,
+	libspy_device_handle * handle, uint8_t const * buf, int len,
 	void (* callback)(libspy_transfer * transfer, libspy_transfer_status status));
 
 #ifdef __cplusplus

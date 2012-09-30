@@ -22,11 +22,6 @@ struct libspy_device_handle
 	HANDLE hFile;
 };
 
-typedef enum spyi_transfer_flags
-{
-	spyi_tf_resubmit = 1
-} spyi_transfer_flags;
-
 struct libspy_transfer
 {
 	libspy_context * ctx;
@@ -36,7 +31,7 @@ struct libspy_transfer
 	int length;
 	int actual_length;
 
-	int flags;
+	LONG refcount;
 
 	libspy_device_handle * handle;
 	void (* callback)(libspy_transfer * transfer, libspy_transfer_status status);
@@ -50,6 +45,7 @@ struct libspy_transfer
 struct libspy_open_future
 {
 	libspy_context * ctx;
+	libpolly_task * completion_task;
 	WCHAR * path;
 	libspy_open_callback callback;
 	void * callback_data;
@@ -57,9 +53,12 @@ struct libspy_open_future
 	DWORD dwError;
 	DCB dcb;
 	int timeout;
+	libspy_device_handle * handle;
 };
 
+static void libspy_ref_transfer(libspy_transfer * transfer);
 static void spyi_submit_read_callback(void * user_data);
+static void spyi_submit_write_callback(void * user_data);
 static void spyb_complete_transfer_locked(libspy_transfer * transfer);
 static void spyb_read_completed(HANDLE handle, void * user_data);
 static WCHAR * to_utf16(char const * utf8);
@@ -98,12 +97,16 @@ void libspy_exit(libspy_context * ctx)
 	free(ctx);
 }
 
+libpolly_context * libspy_get_polly(libspy_context * ctx)
+{
+	return ctx->polly;
+}
+
 void libspy_cancel_transfer(libspy_transfer * transfer)
 {
 	EnterCriticalSection(&transfer->transfer_mutex);
 	if (transfer->handle)
 	{
-		transfer->flags &= ~spyi_tf_resubmit;
 		if (transfer->ctx->CancelIoEx)
 		{
 			transfer->ctx->CancelIoEx(transfer->handle->hFile, &transfer->o);
@@ -161,6 +164,8 @@ libspy_transfer * libspy_alloc_transfer(libspy_context * ctx)
 		return 0;
 	memset(res, 0, sizeof *res);
 
+	res->refcount = 1;
+
 	res->hCompletedEvent = CreateEvent(NULL, TRUE, TRUE, NULL);
 	if (!res->hCompletedEvent)
 	{
@@ -181,17 +186,27 @@ libspy_transfer * libspy_alloc_transfer(libspy_context * ctx)
 	return res;
 }
 
+static void libspy_ref_transfer(libspy_transfer * transfer)
+{
+	InterlockedIncrement(&transfer->refcount);
+}
+
 void libspy_free_transfer(libspy_transfer * transfer)
 {
-	DeleteCriticalSection(&transfer->transfer_mutex);
-	CloseHandle(transfer->o.hEvent);
-	CloseHandle(transfer->hCompletedEvent);
-	free(transfer);
+	if (InterlockedDecrement(&transfer->refcount) == 0)
+	{
+		DeleteCriticalSection(&transfer->transfer_mutex);
+		CloseHandle(transfer->o.hEvent);
+		CloseHandle(transfer->hCompletedEvent);
+		free(transfer);
+	}
 }
 
 void libspy_wait_for_transfer(libspy_transfer * transfer)
 {
 	WaitForSingleObject(transfer->hCompletedEvent, INFINITE);
+	EnterCriticalSection(&transfer->transfer_mutex);
+	LeaveCriticalSection(&transfer->transfer_mutex);
 }
 
 void libspy_set_user_data(libspy_transfer * transfer, void * user_data)
@@ -306,15 +321,15 @@ out:
 	return r;
 }
 
-int libspy_submit_continuous_read(libspy_transfer * transfer,
+int libspy_submit_read_impl(libspy_transfer * transfer,
 	libspy_device_handle * handle, uint8_t * buf, int len,
-	void (* callback)(libspy_transfer * transfer, libspy_transfer_status status))
+	void (* callback)(libspy_transfer * transfer, libspy_transfer_status status),
+	void (* submit_callback)(void * user_data))
 {
 	int r;
 
 	transfer->callback = callback;
 	transfer->handle = handle;
-	transfer->flags = spyi_tf_resubmit;
 	transfer->buf = buf;
 	transfer->length = len;
 
@@ -328,7 +343,9 @@ int libspy_submit_continuous_read(libspy_transfer * transfer,
 	}
 
 	ResetEvent(transfer->hCompletedEvent);
-	r = libpolly_submit_task_direct(transfer->ctx->polly, &spyi_submit_read_callback, transfer);
+
+	libspy_ref_transfer(transfer);
+	r = libpolly_submit_task_direct(transfer->ctx->polly, submit_callback, transfer);
 	if (r < 0)
 	{
 		SetEvent(transfer->hCompletedEvent);
@@ -337,6 +354,7 @@ int libspy_submit_continuous_read(libspy_transfer * transfer,
 			libpolly_cancel_task(transfer->cancel_task);
 			transfer->cancel_task = 0;
 		}
+		libspy_free_transfer(transfer);
 	}
 
 out:
@@ -344,10 +362,26 @@ out:
 	return r;
 }
 
+int libspy_submit_read(libspy_transfer * transfer,
+	libspy_device_handle * handle, uint8_t * buf, int len,
+	void (* callback)(libspy_transfer * transfer, libspy_transfer_status status))
+{
+	return libspy_submit_read_impl(transfer, handle, buf, len, callback, &spyi_submit_read_callback);
+}
+
+int libspy_submit_write(libspy_transfer * transfer,
+	libspy_device_handle * handle, uint8_t const * buf, int len,
+	void (* callback)(libspy_transfer * transfer, libspy_transfer_status status))
+{
+	return libspy_submit_read_impl(transfer, handle, (uint8_t *)buf, len, callback, &spyi_submit_write_callback);
+}
+
+
 int libspy_begin_open(libspy_context * ctx, char const * path, libspy_device_settings const * settings, libspy_open_callback callback, void * user_data, libspy_open_future ** future)
 {
 	DWORD dwThreadId;
 	libspy_open_future * res;
+	int r;
 
 	assert(settings);
 
@@ -355,6 +389,13 @@ int libspy_begin_open(libspy_context * ctx, char const * path, libspy_device_set
 	if (!res)
 		return LIBUSBY_ERROR_NO_MEM;
 	memset(res, 0, sizeof *res);
+
+	r = libpolly_prepare_task(ctx->polly, &res->completion_task);
+	if (r < 0)
+	{
+		free(res);
+		return r;
+	}
 
 	res->ctx = (libspy_context *)ctx;
 	res->callback = callback;
@@ -469,6 +510,12 @@ static char * to_utf8(WCHAR const * utf16)
 	return res;
 }
 
+static void open_complete_task(void * param)
+{
+	libspy_open_future * future = (libspy_open_future *)param;
+	future->callback(future, future->callback_data, future->handle);
+}
+
 static DWORD WINAPI open_thread_proc(LPVOID param)
 {
 	libspy_open_future * future = param;
@@ -499,7 +546,7 @@ static DWORD WINAPI open_thread_proc(LPVOID param)
 	{
 		COMMTIMEOUTS timeouts;
 		timeouts.ReadIntervalTimeout = MAXDWORD;
-		timeouts.ReadTotalTimeoutConstant = future->timeout;
+		timeouts.ReadTotalTimeoutConstant = (future->timeout == 0? MAXDWORD - 1: future->timeout);
 		timeouts.ReadTotalTimeoutMultiplier = MAXDWORD;
 		timeouts.WriteTotalTimeoutConstant = 0;
 		timeouts.WriteTotalTimeoutMultiplier = 0;
@@ -508,18 +555,22 @@ static DWORD WINAPI open_thread_proc(LPVOID param)
 		SetCommState(handle->hFile, &future->dcb);
 	}
 
-	future->callback(future, future->callback_data, handle);
+	future->handle = handle;
+	libpolly_submit_task(future->completion_task, &open_complete_task, future);
 	return 0;
 }
 
 static void spyb_complete_transfer_locked(libspy_transfer * transfer)
 {
+	EnterCriticalSection(&transfer->transfer_mutex);
 	if (transfer->cancel_task)
 	{
 		libpolly_cancel_task(transfer->cancel_task);
 		transfer->cancel_task = 0;
 	}
 	SetEvent(transfer->hCompletedEvent);
+	LeaveCriticalSection(&transfer->transfer_mutex);
+	libspy_free_transfer(transfer);
 }
 
 static void spyb_read_completed(HANDLE handle, void * user_data)
@@ -540,12 +591,7 @@ static void spyb_read_completed(HANDLE handle, void * user_data)
 			transfer->callback(transfer, libspy_transfer_completed);
 	}
 
-	EnterCriticalSection(&transfer->transfer_mutex);
-	if (transfer->flags & spyi_tf_resubmit)
-		spyi_submit_read_callback(transfer);
-	else
-		spyb_complete_transfer_locked(transfer);
-	LeaveCriticalSection(&transfer->transfer_mutex);
+	spyb_complete_transfer_locked(transfer);
 }
 
 static void spyi_submit_read_callback(void * user_data)
@@ -577,9 +623,7 @@ static void spyi_submit_read_callback(void * user_data)
 					if (transfer->callback)
 						transfer->callback(transfer, libspy_transfer_completed);
 				}
-				EnterCriticalSection(&transfer->transfer_mutex);
 				spyb_complete_transfer_locked(transfer);
-				LeaveCriticalSection(&transfer->transfer_mutex);
 			}
 		}
 	}
@@ -589,24 +633,50 @@ static void spyi_submit_read_callback(void * user_data)
 		if (transfer->callback)
 			transfer->callback(transfer, libspy_transfer_completed);
 
-		EnterCriticalSection(&transfer->transfer_mutex);
-		if (transfer->flags & spyi_tf_resubmit)
+		spyb_complete_transfer_locked(transfer);
+	}
+}
+
+static void spyi_submit_write_callback(void * user_data)
+{
+	libspy_transfer * transfer = user_data;
+	libspy_context * ctx = transfer->ctx;
+	DWORD dwTransferred;
+	if (!WriteFile(transfer->handle->hFile, transfer->buf, transfer->length, &dwTransferred, &transfer->o))
+	{
+		DWORD dwError = GetLastError();
+		if (dwError != ERROR_IO_PENDING)
 		{
-			int r = libpolly_submit_task_direct(transfer->ctx->polly, &spyi_submit_read_callback, transfer);
-			if (r < 0)
-			{
-				LeaveCriticalSection(&transfer->transfer_mutex);
-				if (transfer->callback)
-					transfer->callback(transfer, libspy_transfer_error);
-				EnterCriticalSection(&transfer->transfer_mutex);
-				spyb_complete_transfer_locked(transfer);
-			}
+			if (transfer->callback)
+				transfer->callback(transfer, libspy_transfer_error);
 		}
 		else
 		{
-			spyb_complete_transfer_locked(transfer);
+			if (libpolly_win32_add_handle(ctx->polly, transfer->o.hEvent, &spyb_read_completed, transfer) < 0)
+			{
+				CancelIo(transfer->handle->hFile);
+				if (!GetOverlappedResult(transfer->handle->hFile, &transfer->o, &dwTransferred, TRUE))
+				{
+					if (transfer->callback)
+						transfer->callback(transfer, libspy_transfer_error);
+				}
+				else
+				{
+					transfer->actual_length = dwTransferred;
+					if (transfer->callback)
+						transfer->callback(transfer, libspy_transfer_completed);
+				}
+				spyb_complete_transfer_locked(transfer);
+			}
 		}
-		LeaveCriticalSection(&transfer->transfer_mutex);
+	}
+	else
+	{
+		transfer->actual_length = dwTransferred;
+		if (transfer->callback)
+			transfer->callback(transfer, libspy_transfer_completed);
+
+		spyb_complete_transfer_locked(transfer);
 	}
 }
 
@@ -617,4 +687,9 @@ static void spyi_cancel_transfer_callback(void * user_data)
 	if (transfer->handle)
 		CancelIo(transfer->handle->hFile);
 	LeaveCriticalSection(&transfer->transfer_mutex);
+}
+
+libspy_context * libspy_get_context(libspy_device_handle * handle)
+{
+	return handle->ctx;
 }

@@ -23,10 +23,11 @@ public:
 		return m_error_code;
 	}
 
-	static void check(int error_code)
+	static int check(int error_code)
 	{
 		if (error_code < 0)
 			throw error(error_code);
+		return error_code;
 	}
 
 private:
@@ -125,6 +126,15 @@ private:
 	libusby_device * m_dev;
 };
 
+inline std::string get_string_desc_utf8(libusby_device_handle * h, uint8_t desc_index, uint16_t langid = 0)
+{
+	char buf[256];
+	int r = libusby_get_string_descriptor_utf8(h, desc_index, langid, buf, sizeof buf);
+	error::check(r);
+
+	return std::string(buf, buf + r);
+}
+
 class device_handle
 {
 public:
@@ -145,9 +155,23 @@ public:
 		this->open(dev);
 	}
 
+	device_handle(device_handle && h)
+		: m_handle(h.m_handle)
+	{
+		h.m_handle = 0;
+	}
+
 	~device_handle()
 	{
 		this->clear();
+	}
+
+	device_handle & operator=(device_handle && h)
+	{
+		this->clear();
+		m_handle = h.m_handle;
+		h.m_handle = 0;
+		return *this;
 	}
 
 	void open(device const & dev)
@@ -191,17 +215,23 @@ public:
 		return m_handle;
 	}
 
+	libusby_device_handle * release()
+	{
+		libusby_device_handle * res = m_handle;
+		m_handle = 0;
+		return res;
+	}
+
 	std::string get_string_desc_utf8(uint8_t desc_index, uint16_t langid = 0)
 	{
-		char buf[256];
-		int r = libusby_get_string_descriptor_utf8(m_handle, desc_index, langid, buf, sizeof buf);
-		error::check(r);
-
-		return std::string(buf, buf + r);
+		return ::libusby::get_string_desc_utf8(m_handle, desc_index, langid);
 	}
 
 private:
 	libusby_device_handle * m_handle;
+
+	device_handle(device_handle const &);
+	device_handle & operator=(device_handle const &);
 };
 
 typedef std::vector<device> device_list;

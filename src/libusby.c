@@ -102,6 +102,16 @@ void libusby_exit(libusby_context * ctx)
 	free(ctx);
 }
 
+libpolly_context * libusby_get_polly(libusby_context * ctx)
+{
+	return ctx->polly_ctx;
+}
+
+libusby_context * libusby_get_context(libusby_device * dev)
+{
+	return (libusby_context *)dev->ctx;
+}
+
 libusby_transfer * libusby_alloc_transfer(libusby_context * ctx, int iso_packets)
 {
 	size_t alloc_size = usbyb_transfer_size + (sizeof(libusby_iso_packet_descriptor)*(iso_packets-1));

@@ -147,6 +147,8 @@ int libusby_init(libusby_context ** ctx);
 int libusby_init_with_polly(libusby_context ** ctx, libpolly_context * polly);
 void libusby_exit(libusby_context * ctx);
 
+libpolly_context * libusby_get_polly(libusby_context * ctx);
+
 /* Device handling and enumeration */
 int libusby_get_device_list(libusby_context * ctx, libusby_device *** list);
 void libusby_free_device_list(libusby_device ** list, int unref_devices);
@@ -158,6 +160,8 @@ int libusby_open(libusby_device * dev, libusby_device_handle ** dev_handle);
 libusby_device_handle * libusby_open_device_with_vid_pid(libusby_context * ctx, uint16_t vendor_id, uint16_t product_id);
 void libusby_close(libusby_device_handle * dev_handle);
 libusby_device * libusby_get_device(libusby_device_handle * dev_handle);
+
+libusby_context * libusby_get_context(libusby_device * dev);
 
 int libusby_get_configuration(libusby_device_handle * dev_handle, int * config_value);
 int libusby_get_configuration_cached(libusby_device_handle * dev_handle, int * config_value);
