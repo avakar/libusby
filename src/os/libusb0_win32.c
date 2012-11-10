@@ -6,6 +6,8 @@
 
 #include "libusb0_win32_intf.h"
 
+static int const default_timeout = 5000;
+
 typedef BOOL WINAPI cancel_io_ex_t(HANDLE hFile, LPOVERLAPPED lpOverlapped);
 
 typedef struct usbyi_handle_list
@@ -144,7 +146,7 @@ void usbyb_exit(usbyb_context * ctx)
 
 static int usbyb_get_descriptor_with_handle(HANDLE hFile, uint8_t desc_type, uint8_t desc_index, uint16_t langid, unsigned char * data, int length)
 {
-	libusb0_win32_request req = {0};
+	libusb0_win32_request req = { default_timeout };
 	req.descriptor.type = desc_type;
 	req.descriptor.index = desc_index;
 	req.descriptor.language_id = langid;
@@ -164,7 +166,7 @@ int usbyb_get_descriptor(usbyb_device_handle * dev_handle, uint8_t desc_type, ui
 int usbyb_get_configuration(usbyb_device_handle * dev_handle, int * config_value, int cached_only)
 {
 	usbyb_device * dev = (usbyb_device *)dev_handle->pub.dev;
-	libusb0_win32_request req = {0};
+	libusb0_win32_request req = { default_timeout };
 	uint8_t res;
 
 	int r = sync_device_io_control(dev->hFile, LIBUSB_IOCTL_GET_CACHED_CONFIGURATION, &req, sizeof req, &res, sizeof res);
@@ -179,7 +181,7 @@ int usbyb_get_configuration(usbyb_device_handle * dev_handle, int * config_value
 int usbyb_set_configuration(usbyb_device_handle * dev_handle, int config_value)
 {
 	usbyb_device * dev = (usbyb_device *)dev_handle->pub.dev;
-	libusb0_win32_request req = {0};
+	libusb0_win32_request req = { default_timeout };
 
 	req.configuration.configuration = config_value;
 	return sync_device_io_control(dev->hFile, LIBUSB_IOCTL_SET_CONFIGURATION, &req, sizeof req, 0, 0);
@@ -267,7 +269,7 @@ int usbyb_claim_interface(usbyb_device_handle * dev_handle, int interface_number
 {
 	usbyb_device * dev = dev_handle->pub.dev;
 
-	libusb0_win32_request req = {0};
+	libusb0_win32_request req = { default_timeout };
 	req.intf.interface_number = interface_number;
 
 	return sync_device_io_control(dev->hFile, LIBUSB_IOCTL_CLAIM_INTERFACE, &req, sizeof req, 0, 0);
@@ -277,7 +279,7 @@ int usbyb_release_interface(usbyb_device_handle * dev_handle, int interface_numb
 {
 	usbyb_device * dev = dev_handle->pub.dev;
 
-	libusb0_win32_request req = {0};
+	libusb0_win32_request req = { default_timeout };
 	req.intf.interface_number = interface_number;
 
 	return sync_device_io_control(dev->hFile, LIBUSB_IOCTL_RELEASE_INTERFACE, &req, sizeof req, 0, 0);
@@ -353,7 +355,7 @@ int usbyb_perform_transfer(usbyb_transfer * tran)
 	usbyb_device * dev = tran->pub.dev_handle->dev;
 
 	DWORD dwControlCode = 0;
-	libusb0_win32_request req = {0};
+	libusb0_win32_request req = { default_timeout };
 	uint8_t * data_ptr = 0;
 	int data_len = 0;
 	DWORD dwTransferred;
@@ -392,7 +394,7 @@ int usbyb_submit_transfer(usbyb_transfer * tran)
 
 	/* Note that we don't need to keep this around during the whole operation. It is copied
 	 * by the kernel into a temporary buffer. */
-	libusb0_win32_request req = {0};
+	libusb0_win32_request req = { default_timeout };
 	uint8_t * data_ptr = 0;
 	int data_len = 0;
 
@@ -446,7 +448,7 @@ int usbyb_cancel_transfer(usbyb_transfer * tran)
 		}
 		else
 		{
-			libusb0_win32_request req = {0};
+			libusb0_win32_request req = { default_timeout };
 			req.endpoint.endpoint = tran->pub.endpoint;
 			sync_device_io_control(dev->hFile, LIBUSB_IOCTL_ABORT_ENDPOINT, &req, sizeof req, 0, 0);
 		}
